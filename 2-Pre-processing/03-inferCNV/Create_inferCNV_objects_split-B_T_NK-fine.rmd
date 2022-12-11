@@ -48,10 +48,10 @@ seurat_obj <- readRDS(data_path)
 
 # use broad cell annotation for subsetting and fine cell types (Cell_type_identity) for annotation of T, B and NK cells: 
 # identites in broad cell types:
-## seurat_obj@meta.data$broad_DE <- ifelse(seurat_obj@meta.data$Broad_cell_identity %in% c("HSC", "GMP", "MEP", "LymP"), "HSPC",
-##                                             ifelse(seurat_obj@meta.data$Broad_cell_identity %in% c("DC precursor", "pDC", "cDC1", "cDC2", "CD14+ monocyte","CD16+ monocyte", "HLA-II+ monocyte", "Granulocyte","CD11c+"), "Myeloid",
-##                                             ifelse(seurat_obj@meta.data$Broad_cell_identity %in% c("Pre-B","Pro-B", "B","Plasmablast", "Plasma cell"), "B",
-##                                             ifelse(seurat_obj@meta.data$Broad_cell_identity %in% c("CD4+ T", "CD8+ T","MAIT", "gd T"), "T", seurat_obj@meta.data$Broad_cell_identity )) ))
+# seurat_obj@meta.data$broad_DE <- ifelse(seurat_obj@meta.data$Broad_cell_identity %in% c("HSC", "GMP", "MEP", "LymP"), "HSPC",
+#                                             ifelse(seurat_obj@meta.data$Broad_cell_identity %in% c("DC precursor", "pDC", "cDC1", "cDC2", "CD14+ monocyte 1", "CD14+ monocyte 2","CD16+ monocyte", "Granulocyte","CD11c+"), "Myeloid",
+#                                             ifelse(seurat_obj@meta.data$Broad_cell_identity %in% c("Pre-B","Pro-B", "B","Plasmablast", "Plasma cell"), "B",
+#                                             ifelse(seurat_obj@meta.data$Broad_cell_identity %in% c("CD4+ T", "CD8+ T","MAIT", "gd T"), "T", seurat_obj@meta.data$Broad_cell_identity )) ))
 
 cell_types <- c("B", "T", "NK")
 ```
