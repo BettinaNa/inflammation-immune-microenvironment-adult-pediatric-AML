@@ -1,0 +1,227 @@
+---
+title: "Blast population identification `r params$sample_name`"
+author: 'User ID: `r Sys.getenv("USER")`'
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    fig_height: 7
+    fig_width: 9
+    keep_md: yes
+    toc: yes
+    df_print: paged
+params:
+  out_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/"
+  sample_name: "ad_ped_AML_v5"
+  metadata_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/10-Missing-plots-new_anno_v3/metadata.csv"
+  metadata_CNV: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/infercnv-broad-cell-type-per-patient/CNV_metadata_all_patients.csv" # uses the same CNV annotation file as the original script
+  CNV_data_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/R-infercnv-B-T-NK-fine"
+  umap_val: "UMAPndim30nn25lognorm"
+---
+
+```{r setup, include=FALSE}
+attach(params) 
+library(ggplot2)
+library(RColorBrewer)
+library(future)
+library(dplyr)
+library(tibble)
+library(stringr)
+set.seed(1234)
+
+knitr::opts_chunk$set(echo = TRUE, 
+                      warning = FALSE, 
+                      message = FALSE, 
+                      fig.path = file.path(out_path, paste0("R-05_Malignant-ME-identification-", sample_name, "/")))
+
+
+
+# enable parallelization
+plan("multiprocess", workers = 4) # 10 cpus
+options(future.globals.maxSize = 64000 * 1024^3) # for 64 Gb RAM
+
+# set out_path and create dir 
+out_path <- paste0(out_path, "R-05_Malignant-ME-identification-", sample_name, "/")
+if (!dir.exists(out_path)) {dir.create(out_path)}
+
+# additional functions:
+shuf <- function(df){
+  return(df[sample(1:dim(df)[1], dim(df)[1]),])
+}
+```
+## Load metadata
+
+```{r load_data}
+
+metadata <- read.csv(metadata_path, stringsAsFactors=F)
+colnames(metadata)[1] <- "cell"
+
+# samplecolors
+samplecolors <- c((brewer.pal(9, rev("YlGnBu")))[4:9],(brewer.pal(9, rev("PuBuGn")))[6:9], (brewer.pal(9, "YlOrRd"))[3:9], (brewer.pal(9, "Oranges"))[4:9],(brewer.pal(9, "Reds"))[3:9], (brewer.pal(9, "RdPu"))[3:9],(brewer.pal(9, "Purples"))[3:9], (brewer.pal(9, rev("BuPu")))[2:9])
+order_this <- levels(as.factor(metadata$samples))[c(grep("Control",levels(as.factor(metadata$samples))), 
+                                                    grep("^[AMLMS]*[0-9]{4}$",levels(as.factor(metadata$samples))), 
+                                                    grep("^[AML]*[0-9]{3}$",levels(as.factor(metadata$samples))), 
+                                                    grep("^P",levels(as.factor(metadata$samples))) )]
+names(samplecolors) <- order_this
+
+```
+
+## CNV metadata
+We have CNV analysis runs for all samples. Not all samples have annotated CNVs/abnormal karyotype, but some samples show karyotype abnormalities without
+annotation. Plot all possible CNVs for each sample and use any cell that carries a CNV in the malignant annotation. 
+We know that in samples with annotated CNVs, those cells form patient-specific clusters. If CNVs in samples overlay with sample specific
+clusters, they might be worthwhile including.
+
+```{r add_cnv_data}
+# combine InferCNV output data
+dirs <- dir(CNV_data_path, "map_metadata_from_infercnv.txt", recursive=TRUE, full.names = TRUE)
+write.table(dirs, paste0(out_path, "files_used_for_CNV.txt"), quote=FALSE)
+
+cnv_data <- list()
+for (i in seq_along(dirs)){
+    cnv_data[[i]] <- read.delim(dirs[[i]], header=TRUE, row.names=1, stringsAsFactors=FALSE)
+    cnv_data[[i]] <- cnv_data[[i]][which(rownames(cnv_data[[i]]) %in% metadata$cell),]
+}
+
+cnv_data_combined <- cnv_data %>%
+                        purrr::reduce(rbind)
+
+print(dim(cnv_data_combined))
+
+# combine CNV data with seurat_obj metadata:
+metadata <- merge(metadata, cnv_data_combined, by.x="cell", by.y=0, all.x=T) 
+
+```
+
+# Plot potential CNVs for all patients
+Plot all individual CNVs and combine cells that are CNV positive in a common annotation 'CNV_pos_T_B_NK'. We are potentially removing AML033, due to small cell number and AML3133
+due to lack of identifyable CNVs/patient-specific cluster. 
+
+```{r plot_CNV_data_all_patients}
+temp_out <- paste0(out_path, "CNV_plotting/")
+dir.create(temp_out)
+
+metadata_cnv <- read.csv(metadata_CNV, stringsAsFactors=F)
+
+#metadata$aml <- ifelse(metadata$samples %in% str_subset(unique(metadata$samples), "Control"), "Control", "AML")
+#metadata <- metadata[order(metadata$aml, decreasing = TRUE),]
+
+metadata$CNV_pos_T_B_NK <- ifelse(metadata$samples %in% str_subset(unique(metadata$samples), "Control"), "Control", "CNV-")
+
+for (p in colnames(metadata_cnv)[2:length(colnames(metadata_cnv))]){
+
+    print(p)
+    temp_dir <- paste0(temp_out, p, "/")
+    dir.create(temp_dir)
+    
+
+    #density UMAPs
+    # identify whether patient is adult or pediatric
+    group <- metadata %>% select(samples, ap_aml) %>% unique() %>% filter(samples == eval(p)) %>% .$ap_aml
+    p1 <- plot_density_diff((metadata %>% filter(samples %in% c(str_subset(unique(metadata$samples), "Control"), eval(p)))), x_var = paste0(umap_val, "_1"), y_var = paste0(umap_val, "_2"), split_var="ap_aml", num_bins=500, group_pos=eval(group), group_neg="Control", interpolate = FALSE) + theme_classic() + ggtitle(glue("Density UMAP {p}"))
+    print(p1)
+    ggsave(glue("Density_UMAP_{p}_vs_control.png"), path=temp_dir, plot=p1, device="png", height=5, width=7)
+
+    if(sum(metadata_cnv[,eval(p)])>0 ){
+      p_cnv <- metadata_cnv %>% filter(!!sym(p) ==1) %>% .$CNVs
+
+      for (c in p_cnv){
+          # collect information on all CNV+ cells in data set
+          metadata$CNV_pos_T_B_NK <- ifelse(metadata[,eval(c)] == 1 & metadata$samples == eval(p), "CNV+", metadata$CNV_pos_T_B_NK)
+
+          # plot individual CNVs
+          metadata$cnv_temp <- ifelse(metadata$samples %in% str_subset(unique(metadata$samples), "Control"), "Control",
+                          ifelse(metadata[,eval(c)] == 1 & metadata$samples == eval(p), "CNV+",
+                          ifelse(metadata[,eval(c)] == 0 & metadata$samples == eval(p), "CNV-", "AML")))
+          metadata$cnv_temp <- factor(metadata$cnv_temp, levels=c("AML","Control","CNV-","CNV+"))
+          metadata <- metadata[order(metadata$cnv_temp, decreasing = FALSE),]
+
+          print(ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "cnv_temp")) +
+                      geom_point(size = 0.05) +
+                      xlab("UMAP 1") +
+                      ylab("UMAP 2") +
+                      theme_classic() +
+                      ggtitle(paste0(p," ",c))+
+                      scale_color_manual(values=c("lightgrey","#606060", "orange", "darkred")) +
+                      guides(color=guide_legend(override.aes=list(size=3))) +
+                      theme(text = element_text(size=24), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) )
+
+          ggsave(filename = paste0("UMAP_",p,"_",c,"_all_samples.png"), path = temp_dir, width =14 ,height =12 ,device = "png")
+
+          print(ggplot(shuf(metadata %>% filter(samples %in% c(str_subset(unique(metadata$samples), "Control"), eval(p)))), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "cnv_temp")) +
+                      geom_point(size = 0.05) +
+                      xlab("UMAP 1") +
+                      ylab("UMAP 2") +
+                      theme_classic() +
+                      ggtitle(paste0(p," ",c))+
+                      scale_color_manual(values=c("#606060", "orange","darkred")) +
+                      guides(color=guide_legend(override.aes=list(size=3))) +
+                      theme(text = element_text(size=24), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) )
+
+          ggsave(filename = paste0("UMAP_",p,"_",c,".png"), path = temp_dir, width =14 ,height =12 ,device = "png")
+
+
+      }
+    }
+}
+
+
+write.csv(metadata, paste0(out_path, "metadata_cnv.csv"))
+
+```
+
+
+# Does T, B or NK annotation change the cells that are called CNV+?
+
+```{r comparison}
+# compare CNV+ T, B and NK cells
+metadata_comp <- metadata %>% filter(cell %in% rownames(cnv_data_combined))
+metadata_comp$CNV_comp <- ifelse(metadata_comp$CNV_pos=="CNV+" & metadata_comp$CNV_pos_T_B_NK=="CNV+" , "CNV+ both",
+                            ifelse(metadata_comp$CNV_pos=="CNV-" & metadata_comp$CNV_pos_T_B_NK=="CNV+", "CNV+ T, B, NK only", 
+                            ifelse(metadata_comp$CNV_pos=="CNV+" & metadata_comp$CNV_pos_T_B_NK=="CNV-", "CNV+ sample", "CNV-")))
+
+
+
+count <- metadata_comp %>% group_by(samples, broad_DE) %>% dplyr::count(CNV_comp)
+
+ggplot(count, aes(x=samples, y=n, fill=CNV_comp))+
+    geom_bar(stat="identity", position="fill")+
+    scale_fill_brewer(palette ="Paired") +
+    theme_bw()+
+    ylab("Percent CNV T, B & NK cells") +
+    guides(color=guide_legend(override.aes=list(size=3))) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+ggsave(filename = "Barplot_by_sample_CNV_comparison.pdf", path = out_path, width=12 ,height =7 ,device = "pdf", useDingbats=F)
+
+count$broad_DE <- factor(count$broad_DE, levels=c("B", "T", "NK"))
+ggplot(count, aes(x=samples, y=n, fill=CNV_comp))+
+    geom_bar(stat="identity", position="fill")+
+    scale_fill_brewer(palette ="Paired") +
+    theme_bw()+
+    facet_grid(cols=vars(broad_DE), scales = "free", space = "free")+
+    ylab("Percent CNV T, B & NK cells") +
+    guides(color=guide_legend(override.aes=list(size=3))) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+ggsave(filename = "Barplot_broad_cell_type_split.pdf", path = out_path, width=20 ,height =7 ,device = "pdf", useDingbats=F)
+
+
+write.csv(metadata_comp, paste0(out_path, "T_B_NK_annotation_inferCNV.csv"), row.names=FALSE)
+
+
+```
+## Select consensus CNV+ T, B and NK cells as CNV+ cells
+```{r consensus_T_B_NK_cells}
+all_T_NK_B_AML <- metadata_comp %>% filter(aml!="Control") %>% .$cell
+CNV_pos_both <- metadata_comp %>% filter(CNV_comp== "CNV+ both") %>% .$cell
+
+metadata$malignant_adj <- metadata$malignant
+metadata$malignant_adj <- ifelse(metadata$cell %in% all_T_NK_B_AML, "microenvironment", metadata$malignant_adj )
+
+metadata$malignant_adj <- ifelse(metadata$cell %in% CNV_pos_both, "malignant", metadata$malignant_adj )
+```
+
+## Save adjusted metadata
+
+```{r}
+write.csv(metadata, paste0(out_path, "metadata_T_B_NK_adj.csv"), row.names=FALSE)
+```
+

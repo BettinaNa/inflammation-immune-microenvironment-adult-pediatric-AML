@@ -1,0 +1,170 @@
+---
+title: "ScDblFinder filtering with recoverDoublets - `r params$sample_name`"
+author: 'User ID: `r Sys.getenv("USER")`'
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    fig_height: 7
+    fig_width: 9
+    keep_md: yes
+    toc: yes
+    df_print: paged
+params:
+  data_path_adult: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/data/adult" # path to the directory with the outs file
+  data_path_pediatric: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/data/pediatric" # path to the directory with the outs file
+  out_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/data/scDblFinder/" # output path where the outputs will be stored
+  log_file: NULL
+---
+
+```{r setup, include=FALSE}
+attach(params) 
+knitr::opts_chunk$set(echo = TRUE, 
+                      warning = FALSE, 
+                      message = FALSE, 
+                      fig.path = file.path(out_path))
+```
+
+```{r set_up_env}
+library(scDblFinder)
+library(Seurat)
+library(RColorBrewer)
+library(ggplot2)
+library(scater)
+library(future)
+library(stringr)
+library(dplyr)
+
+# # evaluate Seurat R expressions asynchronously when possible (such as ScaleData) using future package
+plan("multiprocess", workers = 4)
+options(future.globals.maxSize = 64000 * 1024^2) # for 64 Gb RAM
+
+#create out_path
+# dir.create(out_path, recursive=TRUE)
+
+dirs <- c(dir(path=data_path_adult,  pattern = "seurat_obj_doublet.rds", full.names=TRUE, recursive=TRUE),
+            dir(path=data_path_pediatric,  pattern = "seurat_obj_doublet.rds", full.names=TRUE, recursive=TRUE))
+
+```
+
+# Read seurat_objs before filtering doublet and negative cells
+We need to load all the objects, filter HTO negative cells and run dimensionality reductions on all libraries.
+We are using the following objects here: 
+`r dirs`
+
+```{r read_seurat_objs_dim_reductions_sce_conversion}
+
+object_list <- list()
+
+# read seurat_objects
+for (i in seq_along(dirs)){
+    object_list[[i]] <- readRDS(dirs[i])
+    DefaultAssay(object = object_list[[i]]) <- "RNA"
+    # remove negative HTO cells
+    object_list[[i]] <- subset(object_list[[i]], cells=which(object_list[[i]]@meta.data$hash.ID=="Negative"), invert=TRUE)
+    object_list[[i]]@meta.data$doublet <- ifelse(object_list[[i]]@meta.data$hash.ID=="Doublet", TRUE, FALSE)
+
+    # run dim_reductions on each object
+    set.seed(1234)
+    object_list[[i]] <- object_list[[i]] %>%
+                    NormalizeData() %>%
+                    FindVariableFeatures(selection.method = "vst", nfeatures = 2000) %>%
+                    ScaleData()
+
+    object_list[[i]] <- RunPCA(object_list[[i]], features = VariableFeatures(object = object_list[[i]]), npcs=30) %>%
+                    RunUMAP(dims = 1:20, n.neighbors=20L, reduction.name = "umap", reduction.key = "UMAP_", verbose = FALSE)
+
+    object_list[[i]] <- as.SingleCellExperiment(object_list[[i]])
+}
+
+```
+# Save sce objects with dim reductions
+Object_list is saved to: `r paste0(out_path, "object_list_sce.rds")`.
+
+```{r save_obj_list}
+saveRDS(object_list, paste0(out_path, "object_list_sce.rds"))
+```
+# Run recoverDoublets on all objects
+We are running the recoverDoublets function from the scDblFinder package to identify cells that are similar to 
+doublets that were identified due to hashing. 
+For each library the recoverDoublet output, the cells that need to be removed and the single cell experiment object
+are saved to a directory with the same name as the orig.ident of each library. 
+Finally, we are saving a combined file with all the cells that need to be filtered based on this analysis to 
+`r paste0(out_path, "hashed_doublets_to_filter_combined.csv")`.
+
+```{r run_recoverDoublets}
+
+for (i in seq_along(dirs)){
+
+    # create library dir
+    sample_name <- gsub("Create-", "", str_split_fixed(dirs[i],"/",12)[,11])
+    temp_path <- paste0(out_path,"/scDblFinder-", sample_name, "/")
+    dir.create(temp_path)
+    
+    print(sample_name)
+    #run scDoublet Finder
+    bp <- BiocParallel::MulticoreParam(4, RNGseed=1234)
+    BiocParallel::bpstart(bp)
+    hashed.doublets  <- recoverDoublets(object_list[[i]], samples=table(object_list[[i]]$hash.ID),  use.dimred="PCA", doublets=object_list[[i]]$doublet, BPPARAM= bp)
+    BiocParallel::bpstop(bp)
+
+    print("inter-sample doublets detected:")
+    print(sum(hashed.doublets$predicted))
+
+    print("This is % of full library:")
+    print(sum(hashed.doublets$predicted)/(length(hashed.doublets$predicted)-sum(hashed.doublets$known))*100)
+
+    hashed.doublets$cell <- colnames(object_list[[i]])
+    write.csv(hashed.doublets, paste0(temp_path, "hashed_doublets_", sample_name,".csv"))
+    
+    # filter to cells that we need to filter from final object
+    hashed.doublets.filter <- subset(hashed.doublets, hashed.doublets$predicted == TRUE)
+
+    object_list[[i]]$proportion <- hashed.doublets$proportion
+    object_list[[i]]$predicted <- hashed.doublets$predicted
+
+    print("Doublet predictions")
+    print(gridExtra::grid.arrange(
+        plotUMAP(object_list[[i]], colour_by="proportion", point_size = 0.1) + ggtitle("Doublet proportions") ,
+        plotUMAP(object_list[[i]], colour_by="doublet", point_size = 0.1) + ggtitle("Known doublets") ,
+        ggcells(object_list[[i]]) +
+            geom_point(aes(x=UMAP.1, y=UMAP.2), color="grey", size=0.1) +
+            geom_point(aes(x=UMAP.1, y=UMAP.2), color="red", size=0.1, 
+                data=function(x) x[x$predicted,]) +
+            ggtitle("Predicted intra-sample doublets") + theme_classic() ,
+        ncol=2        
+    ))
+
+    pdf(paste0(temp_path, "recover_doublet_predictions.pdf"), onefile=FALSE, useDingbats=F, height=12, width=12)
+    print(gridExtra::grid.arrange(
+        plotUMAP(object_list[[i]], colour_by="proportion", point_size = 0.1) + ggtitle("Doublet proportions") ,
+        plotUMAP(object_list[[i]], colour_by="doublet", point_size = 0.1) + ggtitle("Known doublets") ,
+        ggcells(object_list[[i]]) +
+            geom_point(aes(x=UMAP.1, y=UMAP.2), color="grey", size=0.1) +
+            geom_point(aes(x=UMAP.1, y=UMAP.2), color="red", size=0.1, 
+                data=function(x) x[x$predicted,]) +
+            ggtitle("Predicted intra-sample doublets") + theme_classic() ,
+        ncol=2        
+    ))
+    dev.off()
+
+    # plot proportion of neighbors
+    print("Neighbor proportions")
+    state <- ifelse(hashed.doublets$predicted, "predicted",
+        ifelse(hashed.doublets$known, "known", "singlet"))
+    print(ggplot(as.data.frame(hashed.doublets)) + 
+        geom_violin(aes(x=state, y=proportion)) )
+    ggsave("proportion_neighbors.pdf", path=temp_path, device="pdf")
+
+    saveRDS(object_list[[i]], paste0(temp_path, "sce_obj_", sample_name,".rds") )
+
+    if(i == 1){
+        hashed.doublets.combined <- hashed.doublets.filter
+    } else {
+        hashed.doublets.combined <- rbind(hashed.doublets.combined, hashed.doublets.filter)
+    }
+}
+
+write.csv(hashed.doublets.combined, paste0(out_path, "hashed_doublets_to_filter_combined.csv"))
+
+
+```

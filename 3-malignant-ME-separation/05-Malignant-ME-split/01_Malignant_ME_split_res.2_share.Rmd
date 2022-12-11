@@ -1,0 +1,324 @@
+---
+title: "Blast population identification `r params$sample_name`"
+author: 'User ID: `r Sys.getenv("USER")`'
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    fig_height: 7
+    fig_width: 9
+    keep_md: yes
+    toc: yes
+    df_print: paged
+params:
+  out_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/" # output directory
+  sample_name: "ad_ped_AML_v5_res2" # sample name
+  metadata_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/04_metadata_res.2.csv" # metadata that includes UMAP and clustering information, cell (colnames of seurat_obj) are annotated as "cell" in metadata, aml column contain "AML/Control" information in our case
+  metadata_CNV: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/infercnv-broad-cell-type-per-patient/CNV_metadata_all_patients.csv" # CNVs to plot for each patient, path to cnv file - columns are sample names, rows CNVs (names matching map_metadata_from_infercnv.txt file columns) that should be plotted for each patient
+  CNV_data_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/infercnv-broad-cell-type-per-patient-res.2/" # inferCNV directory - this looks for 'map_metadata_from_infercnv.txt' files, which can be generated with infercnv::add_to_seurat() function
+  umap_val: "UMAPndim30nn25lognorm" # UMAP that your clustering is based - coordinates must be part of metadata
+---
+
+```{r setup, include=FALSE}
+attach(params) 
+library(ggplot2)
+library(RColorBrewer)
+library(future)
+library(dplyr)
+library(tibble)
+library(stringr)
+set.seed(1234)
+
+knitr::opts_chunk$set(echo = TRUE, 
+                      warning = FALSE, 
+                      message = FALSE, 
+                      fig.path = file.path(out_path, paste0("05_Malignant-ME-identification-", sample_name, "/")))
+
+# set out_path and create dir 
+out_path <- paste0(out_path, "05_Malignant-ME-identification-", sample_name, "/")
+if (!dir.exists(out_path)) {dir.create(out_path)}
+
+# additional functions:
+shuf <- function(df){
+  return(df[sample(1:dim(df)[1], dim(df)[1]),])
+}
+```
+## Load metadata
+
+```{r load_data}
+metadata <- read.csv(metadata_path, stringsAsFactors=F)
+```
+
+## CNV metadata
+We have CNV analysis runs for all samples. Not all samples have annotated CNVs/abnormal karyotype, but some samples show karyotype abnormalities without
+annotation. Plot all possible CNVs for each sample and use any cell that carries a CNV in the malignant annotation. 
+We know that in samples with annotated CNVs, those cells form patient-specific clusters. If CNVs in samples overlay with sample specific
+clusters, they might be worthwhile including.
+
+```{r add_cnv_data}
+# combine InferCNV output data
+dirs <- dir(CNV_data_path, "map_metadata_from_infercnv.txt", recursive=TRUE, full.names = TRUE)
+write.table(dirs, paste0(out_path, "files_used_for_CNV.txt"), quote=FALSE)
+
+write.table(dirs, paste0(out_path, "files_used_for_CNV.txt"), quote=FALSE)
+
+cnv_data <- list()
+for (i in seq_along(dirs)){
+    cnv_data[[i]] <- read.delim(dirs[[i]], header=TRUE, row.names=1, stringsAsFactors=FALSE)
+    cnv_data[[i]] <- cnv_data[[i]][which(rownames(cnv_data[[i]]) %in% metadata$cell),]
+}
+
+cnv_data_combined <- cnv_data %>%
+                        purrr::reduce(rbind)
+
+print(dim(cnv_data_combined))
+
+# combine CNV data with seurat_obj metadata:
+metadata <- merge(metadata, cnv_data_combined, by.x="cell", by.y=0, all.x=T) 
+
+```
+
+# Plot potential CNVs for all patients
+Plot all individual CNVs and combine cells that are CNV positive in a common annotation 'CNV_pos'. We are potentially removing AML033, due to small cell number and AML3133
+due to lack of identifyable CNVs/patient-specific cluster. 
+
+```{r plot_CNV_data_all_patients}
+temp_out <- paste0(out_path, "CNV_plotting/")
+dir.create(temp_out)
+
+metadata_cnv <- read.csv(metadata_CNV, stringsAsFactors=F)
+
+# all sample names are stored in my "samples" column, my control samples are called "ControlXX", here I am inititing a new column
+# where the Controls are annotated as CNV- before iterating through the patients
+
+metadata$CNV_pos <- ifelse(metadata$samples %in% str_subset(unique(metadata$samples), "Control"), "Control", "CNV-")
+
+for (p in colnames(metadata_cnv)[2:length(colnames(metadata_cnv))]){
+
+    print(p)
+    temp_dir <- paste0(temp_out, p, "/")
+    dir.create(temp_dir)
+    
+    if(sum(metadata_cnv[,eval(p)])>0 ){
+      p_cnv <- metadata_cnv %>% filter(!!sym(p) ==1) %>% .$CNVs
+
+      for (c in p_cnv){
+          # collect information on all CNV+ cells in data set
+          metadata$CNV_pos <- ifelse(metadata[,eval(c)] == 1 & metadata$samples == eval(p), "CNV+", metadata$CNV_pos)
+
+          # plot individual CNVs
+          metadata$cnv_temp <- ifelse(metadata$samples %in% str_subset(unique(metadata$samples), "Control"), "Control",
+                          ifelse(metadata[,eval(c)] == 1 & metadata$samples == eval(p), "CNV+",
+                          ifelse(metadata[,eval(c)] == 0 & metadata$samples == eval(p), "CNV-", "AML")))
+          metadata$cnv_temp <- factor(metadata$cnv_temp, levels=c("AML","Control","CNV-","CNV+"))
+          metadata <- metadata[order(metadata$cnv_temp, decreasing = FALSE),]
+
+          print(ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "cnv_temp")) +
+                      geom_point(size = 0.05) +
+                      xlab("UMAP 1") +
+                      ylab("UMAP 2") +
+                      theme_classic() +
+                      ggtitle(paste0(p," ",c))+
+                      scale_color_manual(values=c("lightgrey","#606060", "orange", "darkred")) +
+                      guides(color=guide_legend(override.aes=list(size=3))) +
+                      theme(text = element_text(size=24), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) )
+
+          ggsave(filename = paste0("UMAP_",p,"_",c,"_all_samples.png"), path = temp_dir, width =14 ,height =12 ,device = "png")
+
+          print(ggplot(shuf(metadata %>% filter(samples %in% c(str_subset(unique(metadata$samples), "Control"), eval(p)))), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "cnv_temp")) +
+                      geom_point(size = 0.05) +
+                      xlab("UMAP 1") +
+                      ylab("UMAP 2") +
+                      theme_classic() +
+                      ggtitle(paste0(p," ",c))+
+                      scale_color_manual(values=c("#606060", "orange","darkred")) +
+                      guides(color=guide_legend(override.aes=list(size=3))) +
+                      theme(text = element_text(size=24), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) )
+
+          ggsave(filename = paste0("UMAP_",p,"_",c,".png"), path = temp_dir, width =14 ,height =12 ,device = "png")
+
+      }
+    }
+}
+
+
+# plot all cells with specific CNVs
+for (c in metadata_cnv$CNVs) {
+    metadata[,eval(c)] <- as.factor(metadata[,eval(c)])
+        print(ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = eval(c))) +
+                    geom_point(size = 0.05) +
+                    xlab("UMAP 1") +
+                    ylab("UMAP 2") +
+                    theme_classic() +
+                    ggtitle(c)+
+                    scale_color_manual(values=c("lightgrey", "darkred")) +
+                    guides(color=guide_legend(override.aes=list(size=3))) +
+                    theme(text = element_text(size=24), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) )
+
+        ggsave(filename = paste0("UMAP_",c,"_all_samples.png"), path = temp_out, width =14 ,height =12 ,device = "png")
+
+}
+
+
+# plot all CNV+ cells on UMAP
+metadata$CNV_pos <- factor(metadata$CNV_pos, levels=c("Control", "CNV-", "CNV+"))
+print(ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "CNV_pos")) +
+            geom_point(size = 0.05) +
+            xlab("UMAP 1") +
+            ylab("UMAP 2") +
+            theme_classic() +
+            ggtitle("All CNV+ cells")+
+            scale_color_manual(values=c("#606060", "orange","darkred")) +
+            guides(color=guide_legend(override.aes=list(size=3))) +
+            theme(text = element_text(size=24), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) )
+
+ggsave(filename = paste0("UMAP_all_CNV+_cells_all_samples.png"), path = temp_dir, width =14 ,height =12 ,device = "png")
+
+write.csv(metadata, paste0(out_path, "metadata_cnv.csv"))
+
+```
+
+# Patient occupancy scoring
+We want to identify those clusters that are mainly occupied by specific patients. We selected cluster resolution res.0.6 and an occupancy score > 0.7 as the cut off for patient-specific clusters.
+Plot those clusters with the patient-specific annotation.
+
+## Define occupancy for each individual patient
+Instead of using all AML patients vs Controls together, let's subset to each individual patient+ Controls and calculate occupancy for each cluster.
+Call those clusters malignant where we have strong enrichment for the specific patient. 
+
+```{r occupancy_scoring3}
+
+# loop through each cluster in each of the selected resolutions
+res <- "res.2"
+#res <- c("res.0.4","res.0.5", "res.0.6", "res.0.7", "res.0.8", "res.0.9", "res.1", "res.1.1", "res.1.2", "res.1.3", "res.1.4", "res.1.5" )
+for (r in res){
+    print(r)
+    temp_path <- paste0(out_path, r, "/")
+    if(!dir.exists(temp_path)){dir.create(temp_path)}
+
+  # 
+  # run loop - subset data to controls+ individual patient 
+  samples <- unique(str_replace(metadata$samples, "Control\\d.*", "Control"))
+  common_table <- tibble()
+  for (s in samples){
+  cluster_table <- metadata %>% 
+                    mutate(samples_control = str_replace(samples, "Control\\d.*", "Control")) %>%
+                    filter(samples_control %in% c(eval(s), "Control")) %>%
+                    group_by(!!sym(r)) %>%
+                    dplyr::count(aml) %>% 
+                    tidyr::spread(aml, n) %>%
+                    tidyr::drop_na(AML) %>%
+                    tidyr::replace_na(list(Control=0)) %>%
+                    dplyr::summarise(sample=eval(s), group_sum=AML+Control, sample_count=AML,  occupancy_score_sample=sample_count/group_sum)
+
+  common_table <- rbind(common_table,cluster_table)
+  }
+
+  common_table <- as.data.frame(common_table)
+  common_table$cluster_sample <- paste0(as.character(common_table[,eval(r)]), "_",  common_table[,"sample"])
+  write.csv(common_table, paste0(temp_path, "occupancy_score_calc_by_patient_",r,".csv"))
+
+    # merge metadata with occupancy score
+    metadata$cluster_sample <- paste0(as.character(metadata[,eval(r)]), "_", metadata[,"samples"])
+    meta <- full_join(metadata, common_table[3:6], by="cluster_sample")
+
+    plotlist <- list()
+    # # plot occupancy score
+
+    # #pre-define cluster colors
+    getPalette1 = colorRampPalette(c(brewer.pal(11, "Spectral"), brewer.pal(11, "BrBG")))
+    cluster_colors = getPalette1(length(unique(meta[,eval(r)])))
+    names(cluster_colors) <- levels(factor(meta[,eval(r)]))
+
+    meta$cluster <- factor(meta[,eval(r)])
+    plotlist[[1]] <- ggplot(meta, aes_string(paste0(umap_val,"_1"), paste0(umap_val,"_2"), color = "cluster")) +
+                        geom_point(size = 0.01) +
+                        xlab("UMAP 1") +
+                        ylab("UMAP 2") +
+                        theme_classic() + ggtitle(paste0("Clusters ",r))+
+                        scale_color_manual(values=cluster_colors) +
+                        guides(color=guide_legend(override.aes=list(size=3))) +
+                        theme(text = element_text(size=20), panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+    print(plotlist[[1]])
+    ggsave(filename = glue("UMAP_clusters_{r}.pdf"), plot=plotlist[[1]], path = temp_path, width =13 ,height =10 ,device = "pdf", useDingbats=F)
+
+
+    # plot occupancy score
+    plotlist[[2]] <- ggplot(shuf(meta), aes_string(paste0(umap_val,"_1"), paste0(umap_val,"_2"), color = "occupancy_score_sample")) +
+                        geom_point(size = 0.01) +
+                        xlab("UMAP 1") +
+                        ylab("UMAP 2") +
+                        theme_classic() +
+                        scale_color_gradient(low = 'grey', high = 'darkblue') + ggtitle("Occupancy score patient-vs-control")+
+                        theme(text = element_text(size=20), panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+    print(plotlist[[2]])
+    ggsave(filename = glue("UMAP_occupancy_score_patient_vs_control_{r}.pdf"), plot=plotlist[[2]], path = temp_path, width =13 ,height =10 ,device = "pdf", useDingbats=F)
+
+    # plot cluster assignment
+
+    meta$Cluster_assign_patient_0.7 <- ifelse(meta$occupancy_score_sample > 0.7, "malignant", "microenvironment")
+    meta <- meta %>% tidyr::replace_na(list(Cluster_assign_patient_0.7 ="Control"))
+    plotlist[[3]] <- ggplot(shuf(meta), aes_string(paste0(umap_val,"_1"), paste0(umap_val,"_2"), color = "Cluster_assign_patient_0.7")) +
+                        geom_point(size = 0.01) +
+                        xlab("UMAP 1") +
+                        ylab("UMAP 2") +
+                        theme_classic() + ggtitle(paste0("Clusters ",r, " 0.7 cut off"))+
+                        scale_color_manual(values=c("grey","darkred","black")) +
+                        guides(color=guide_legend(override.aes=list(size=3))) +
+                        theme(text = element_text(size=12), panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+    
+    print( plotlist[[3]])
+    ggsave(filename = glue("UMAP_cluster_assignment_patient_vs_control_0.7_{r}.pdf"), plot=plotlist[[3]], path = temp_path, width =7 ,height =5 ,device = "pdf", useDingbats=F)
+
+
+
+    print(cowplot::plot_grid(plotlist=plotlist,ncol=3, nrow=1))
+    ggsave(filename = glue("UMAPs_{r}_occupancy_combined.pdf"), path = temp_path, width =23 ,height =7 ,device = "pdf", useDingbats=F)
+
+
+    write.csv(meta, paste0(temp_path, "metadata_",r,".csv"))
+}
+
+# uses the last run resolution downstream (re-running the entire script with the correct resolution is required)
+metadata <- meta 
+
+```
+
+
+# Is a given cell malignant or part of the microenvironment?
+We are first selecting all cells that do belong to a patient-specifc cluster as defined by the occupancy score, and then use the CNV annotations
+to add an additional layer of information to also select cells that do not occupy patient-specific space. We are basically combining "res.0.5_cluster_assign_0.7" and
+"CNV_pos" in this step.
+
+```{r malignant_assignment_patient_vs_control}
+
+metadata$samples <- factor(metadata$samples)
+
+
+metadata$which_malignant <- ifelse( metadata$Cluster_assign_patient_0.7=="malignant" & metadata$CNV_pos=="CNV+", "CNV_occupancy_score",
+                            ifelse( metadata$Cluster_assign_patient_0.7=="malignant", "occupancy_score",
+                            ifelse(metadata$CNV_pos =="CNV+", "CNV_analysis", "none" )))
+
+metadata$malignant <- ifelse(metadata$samples %in% str_subset(unique(metadata$samples), "Control"), "Control",
+                      ifelse( metadata$Cluster_assign_patient_0.7=="malignant" | metadata$CNV_pos=="CNV+", "malignant", "microenvironment"))
+
+metadata$malignant <- factor(metadata$malignant, levels=c("Control", "malignant", "microenvironment"))
+
+
+ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "malignant")) +
+            geom_point(size = 0.05) +
+            xlab("UMAP 1") +
+            ylab("UMAP 2") +
+            theme_classic() +
+            ggtitle("Malignant_microenvironment")+
+            scale_color_manual(values=c("#606060","darkred", "orange")) +
+            guides(color=guide_legend(override.aes=list(size=3))) +
+            theme(text = element_text(size=24), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) 
+ggsave(filename = paste0("UMAP_control_malignant_ME_patient_wise_os.pdf"), path = out_path, width =14 ,height =12 ,device = "pdf", useDingbats=F)
+
+```
+
+
+```{r save}
+write.csv(metadata, paste0(out_path, "metadata_malignant_ME.csv"))
+```
+

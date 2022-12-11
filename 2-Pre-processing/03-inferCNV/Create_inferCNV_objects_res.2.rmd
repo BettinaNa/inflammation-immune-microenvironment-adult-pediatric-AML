@@ -1,0 +1,59 @@
+---
+title: "Generate inferCNV objects `r params$sample_name`"
+author: 'User ID: `r Sys.getenv("USER")`'
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    fig_height: 7
+    fig_width: 9
+    keep_md: yes
+    toc: yes
+    df_print: paged
+params:
+  data_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/Cluster-ad_ped_cntrl_v5/seurat_obj.rds" # path to seurat obj
+  out_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/infercnv-broad-cell-type-per-patient-res.2/" # output path where the outputs will be stored
+  metadata_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/geneset-score-ad_ped_cntrl_v5_res.2/cell_module_anno.csv" # output file from CellCall_res.2.Rmd
+  sample_name: "adult_pediatric_AML"
+  log_file: "log" # log file
+---
+
+```{r setup, include=FALSE}
+attach(params) 
+library(Seurat)
+library(future)
+library(dplyr)
+library(tibble)
+library(stringr)
+devtools::load_all("/gpfs/data/aifantislab/home/nadorb01/common_scripts/scooter")
+source("scripts/05_inferCNV/createInferCNVObject_call.R") 
+
+knitr::opts_chunk$set(echo = FALSE,
+                      warning = FALSE, 
+                      message = FALSE, 
+                      fig.path = out_path,
+                      dev = c("png", "pdf"))
+
+plan("multiprocess", workers = 4)
+options(future.globals.maxSize = 64000 * 1024^3 )
+
+# Create output directory
+dir.create(out_path)
+```
+
+## Read data
+```{r }
+seurat_obj <- readRDS(data_path)
+# load cell_types
+metadata <-  read.csv(metadata_path, row.names=1, stringsAsFactors=F) %>% rename(broad_cell_type=module)
+# add metadata to seurat_obj
+seurat_obj <- AddMetaData(seurat_obj, metadata = metadata)
+seurat_obj@meta.data$broad_cell_type <- gsub("\\.score", "", seurat_obj@meta.data$broad_cell_type)
+
+samples <- unique(seurat_obj@meta.data$samples)
+```
+# Generate inferCNV objects for each sample
+```{r generate_inferCNV}
+for (s in samples){
+    createInferCNVObject_call(seurat_obj=seurat_obj, s=s)
+}
+```

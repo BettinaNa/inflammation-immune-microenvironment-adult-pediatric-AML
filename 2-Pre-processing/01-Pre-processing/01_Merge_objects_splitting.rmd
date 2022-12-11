@@ -1,0 +1,82 @@
+---
+title: "Merge all Seurat Object for `r params$sample_name`"
+author: 'User ID: `r Sys.getenv("USER")`'
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    fig_height: 7
+    fig_width: 9
+    keep_md: yes
+    toc: yes
+    df_print: paged
+params:
+  data_path_adult: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/data/adult" # path to the directory with the outs file
+  data_path_pediatric: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/data/pediatric" # path to the directory with the outs file
+  out_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/data/" # output path where the outputs will be stored
+  sample_name: "Merge_ad_ped_cntrl_v5"   # name of the current sample
+  samples_remove: "NA"
+  log_file: "log" # log file
+---
+
+```{r setup, include=FALSE}
+attach(params) 
+knitr::opts_chunk$set(echo = FALSE,
+                      warning = FALSE, 
+                      message = FALSE, 
+                      fig.path = file.path(out_path, paste0("Merge-", sample_name, "/")),
+                      fig.height = 10, 
+                      fig.width = 15,
+                      dev = c("png", "pdf"))
+```
+
+```{r load_libraries}
+library(future)
+library(Seurat)
+library(stringr)
+source("/gpfs/data/aifantislab/home/nadorb01/common_scripts/helper.R")
+
+# # evaluate Seurat R expressions asynchronously when possible (such as ScaleData) using future package
+plan("multiprocess", workers = 4)
+# # increase the limit of the data to be shuttled between the processes from default 500MB to 50GB
+options(future.globals.maxSize = 64 * 1024^2)
+
+```
+
+```{r read_objects}
+# merging all objects
+# read seurat objects from all 3 directories
+dirs <- c(dir(path=data_path_adult,  pattern = "seurat_obj.rds", full.names=TRUE, recursive=TRUE),
+            dir(path=data_path_pediatric,  pattern = "seurat_obj.rds", full.names=TRUE, recursive=TRUE))
+
+```
+
+```{r merging}
+seurat_object_list <- list()
+
+# read seurat_objects
+for (i in seq_along(dirs)){
+    seurat_object_list[[i]] <- readRDS(dirs[i])
+    seurat_object_list[[i]]@reductions <- list()
+    DefaultAssay(object = seurat_object_list[[i]]) <- "RNA"
+}
+
+# merge all objects
+seurat_obj <- merge(seurat_object_list[[1]], y = seurat_object_list[2:length(seurat_object_list)])
+
+
+# write cell-ident table
+dt <- as.data.frame(str_split_fixed(colnames(seurat_obj),":", 2))
+colnames(dt) <- c("orig.ident","barcode")
+write.csv(dt, paste0(out_path,"metadata/orig.ident_barcode_table.csv"))
+
+seurat_obj@meta.data$remove <- ifelse(seurat_obj@meta.data$samples %in% samples_remove, "yes", "no")
+```
+
+```{r filter}
+# ## filter samples we do not need
+seurat_obj <- subset(seurat_obj, cells=which(seurat_obj@meta.data$samples %in% samples_remove), invert=TRUE)
+```
+
+```{r save_merged_obj}
+saveRDS(seurat_obj, paste0(out_path, "merged_seurat.rds"))
+```

@@ -1,0 +1,718 @@
+---
+title: "Plot manuscript figures `r params$sample_name`"
+author: 'User ID: `r Sys.getenv("USER")`'
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    fig_height: 7
+    fig_width: 9
+    keep_md: yes
+    toc: yes
+    df_print: paged
+params:
+  out_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/"
+  metadata_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/R-05_Malignant-ME-identification-ad_ped_AML_v5/metadata.csv"
+  metadata_Fig2: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/revisions_data/Figure_source_data/Source_data_Fig2.csv"
+  B_seurat_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/R-Figure3-B_cells_no_cc_reg/seurat_obj_B_fin.rds"
+  Atypical_B_DE_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/R-Figure3-B_cells_no_cc_reg/Atypical_B_DE/DE_genes_Atypical_B_cells_MAST.csv"
+  bulk_signature_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/13-Inflamation-signatures-bulk-cohorts-weighted/All_signatures_all_bulk_cohorts.rds"
+  metadata_path_T_NK: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/R-Figure4-T_cells_no_cc_reg/s_obj_T_NK_wo_cluster15_final.rds"
+  Tpex_gene_list_path: "/gpfs/data/aifantislab/home/nadorb01/Common_data/Tpex_full_gene_list.csv"
+  metadata_path_TCR: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/09-TCR-analysis-diagnotic_AML_Cntrl_re_annotate/gene_plus_nt_cloneType_proportion/metadata.csv"
+  TCR_BCR_Liu_data: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/13-Inflamation-signatures-bulk-cohorts-weighted/BCR_TCR_data_TCGA_TARGET_Liu_inflammation_scores.csv"
+  sample_name: "ad_ped_AML"
+  subsample: TRUE
+---
+
+```{r setup, include=FALSE}
+attach(params) 
+library(Seurat)
+library(future)
+library(dplyr)
+library(ggplot2)
+library(RColorBrewer)
+library(tibble)
+library(ggpubr)
+library(EnhancedVolcano)
+
+knitr::opts_chunk$set(echo = TRUE, 
+                      warning = FALSE, 
+                      message = FALSE, 
+                      fig.path = file.path(out_path, paste0("Manuscript-figures-", sample_name, "/")))
+
+# enable parallelization
+plan("multiprocess", workers = 4) # 10 cpus
+options(future.globals.maxSize = 59600 * 1024^3) # for 64 Gb RAM, 119200 * 1024^3 for 128GB
+
+# set out_path and create dir 
+out_path1 <- out_path
+out_path <- paste0(out_path, "Manuscript-figures-", sample_name, "/")
+if (!dir.exists(out_path)) {dir.create(out_path)}
+
+
+# shuffle function:
+shuf <- function(df){
+  return(df[sample(1:dim(df)[1], dim(df)[1]),])
+}
+
+```
+
+```{r}
+metadata <- read.csv(metadata_path, stringsAsFactor=FALSE)
+```
+
+
+```{r set_up_plotting_colors}
+# set up plotting colors
+samplecolors <- c((brewer.pal(9, rev("YlGnBu")))[4:9],(brewer.pal(9, rev("PuBuGn")))[6:9], (brewer.pal(9, "YlOrRd"))[3:9], 
+                  (brewer.pal(9, "Oranges"))[4:9],(brewer.pal(9, "Reds"))[3:9], (brewer.pal(9, "RdPu"))[3:9],
+                  (brewer.pal(9, "Purples"))[3:9], (brewer.pal(9, rev("BuPu")))[2:9])
+
+order_this <- levels(as.factor(metadata$samples))[c(grep("Control",levels(as.factor(metadata$samples))), 
+                                                    grep("^[AMLMS]*[0-9]{4}$",levels(as.factor(metadata$samples))), 
+                                                    grep("^[AML]*[0-9]{3}$",levels(as.factor(metadata$samples))), 
+                                                    grep("^P",levels(as.factor(metadata$samples))) )]
+names(samplecolors) <- order_this
+
+#ap_aml
+group_colors <- samplecolors[c(4,13,37)]
+names(group_colors) <- c("Control", "adult_AML", "pediatric_AML")
+
+#ap_aml_age
+group_colors_age <- c(samplecolors[2], group_colors)
+names(group_colors_age) <- c("control_19to26yrs", "control_39to53yrs", "adult_AML", "pediatric_AML")
+
+#broad cell type colors
+# cell types split by Control, malignant, ME (Figure 1H)
+cell_type_order <- c("HSC","MPP", "GMP", "MEP", "LymP", "DC precursor", "pDC", "cDC1", "cDC2", "CD14+ monocyte 1","CD16+ monocyte", "CD14+ monocyte 2", "Granulocyte", "CD11c+", "Pre-B","Pro-B", "B","Plasmablast", "Plasma cell", "CD4+ T", "CD8+ T","MAIT", "gd T", "NK", "Ery","Megakaryocyte", "Perivascular cell")
+# define colors:
+colors<- c(brewer.pal(9, "YlGnBu")[3:7],  brewer.pal(9, "RdPu")[5:8], brewer.pal(9,"Oranges")[4:8], brewer.pal(9,"Reds")[4:8], brewer.pal(9,"BuPu")[6:9], brewer.pal(9,"YlOrBr")[3], brewer.pal(8,"Set2")[7],"#4A2600", brewer.pal(8,"Dark2")[7] )
+names(colors) <- cell_type_order
+```
+
+## Figure 1
+
+```{r replot_malignant_ME_plots_for_figures}
+# metadata with relevant annotations in Source data 1
+umap_val <- "UMAPndim30nn25lognorm"
+# Figure 1A) 
+metadata$ap_aml <- factor(metadata$ap_aml, levels=c("Control", "adult_AML", "pediatric_AML"))
+print(ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "ap_aml")) +
+        geom_point(size = 0.1) +
+        xlab("UMAP_1") +
+        ylab("UMAP_2") +
+        theme_classic()+
+        scale_colour_manual(values=group_colors) +
+        guides(color=guide_legend(override.aes=list(size=5))) +
+        theme(text = element_text(size=24), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) )
+ggsave(filename = "UMAP_ap_aml_colored.pdf", path = out_path, width =18 ,height =14 ,device = "pdf", useDingbats=F)
+
+# Figure 1B)
+metadata$Broad_cell_identity <- factor(metadata$Broad_cell_identity, levels=cell_type_order)
+print(ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "Broad_cell_identity")) +
+        geom_point(size = 0.05) +
+        xlab("UMAP 1") +
+        ylab("UMAP 2") +
+        theme_bw() +
+        facet_wrap("ap_aml", ncol=3)+
+        scale_color_manual(values=colors) +
+        guides(color=guide_legend(override.aes=list(size=3))) +
+        theme(text = element_text(size=24), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) )
+ggsave(filename = paste0("UMAP_Broad_cell_identity_split_control_ap_aml.pdf"), path = out_path, width =24 ,height =7 ,device = "pdf", useDingbats=F)
+
+# Figure 1C)
+metadata$samples_control <- ifelse(metadata$samples %in% grep("Control",unique(metadata$samples), value=TRUE), "Control", metadata$samples)
+samplecolors_control <- c("lightgrey", samplecolors[11:length(samplecolors)])
+names(samplecolors_control)[1] <- "Control"
+metadata$samples_control <- factor(metadata$samples_control, levels= names(samplecolors_control))
+
+print(ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "samples_control")) +
+        geom_point(size = 0.1) +
+        xlab("UMAP_1") +
+        ylab("UMAP_2") +
+        theme_classic()+
+        scale_colour_manual(values=samplecolors_control) +
+        guides(color=guide_legend(override.aes=list(size=5))) +
+        theme(text = element_text(size=24), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) )
+ggsave(filename = "UMAP_samples_greyControl.pdf", path = out_path, width =20 ,height =14 ,device = "pdf", useDingbats=F)
+
+
+# Figure 1E)
+# Extended Data Fig 2C)
+# CNV+ plots
+cols <- c("#606060",  "darkred", "orange")
+names(cols) <- c("Control","CNV+","CNV-")
+aml_patients <- unique(metadata %>% filter(CNV_pos=="CNV+") %>% .$samples)
+temp_path <- paste0(out_path, "CNV_pos_patient_UMAPs/")
+
+for (p in aml_patients){
+
+    print(ggplot(shuf(metadata %>% filter(samples %in% c(str_subset(unique(metadata$samples), "Control"), eval(p)))), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "CNV_pos")) +
+                geom_point(size = 0.05) +
+                xlab("UMAP 1") +
+                ylab("UMAP 2") +
+                theme_classic() +
+                ggtitle(paste0(p," CNV+"))+
+                scale_color_manual(values=cols) +
+                guides(color=guide_legend(override.aes=list(size=3))) +
+                theme(text = element_text(size=24), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) )
+
+    ggsave(filename = paste0("UMAP_",p,"_CNV_positive.pdf"), path = temp_path, width =14 ,height =12 ,device = "pdf")
+}
+
+# Figure 1F)
+# Extended Data Fig 2C)
+temp_path <- paste0(out_path, "ME_malignant_patient_quant/")
+dir.create(temp_path)
+
+count <- metadata %>% group_by(samples, malignant) %>% dplyr::count(Broad_cell_identity)
+count$Broad_cell_identity <- factor(count$Broad_cell_identity, levels=cell_type_order)
+count$malignant <- factor(count$malignant, levels=c("Control", "malignant", "microenvironment"))
+
+aml_patients <- metadata %>% filter(aml=="AML") %>% .$samples %>% unique()
+for (p in aml_patients){
+    count1 <- count %>% filter(samples == eval(p))
+
+    print(ggplot(count1, aes(x=malignant, y=n, fill=Broad_cell_identity))+
+        geom_bar(stat="identity", position="fill")+
+        scale_fill_manual(values=colors) +
+        theme_classic()+
+        ylab("Percent Cell Type") +
+        guides(color=guide_legend(override.aes=list(size=3))) +
+        theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) )
+    ggsave(filename = paste0("Barplot_Broad_cell_identity_",p,".pdf"), path = temp_path, width=5 ,height =7 ,device = "pdf", useDingbats=F)
+
+}
+
+# Figure 1G)
+metadata$malignant <- factor(metadata$malignant, levels=c("Control", "malignant", "microenvironment"))
+# control, malignant, ME - grey/darkred, orange (Figure 1G)
+print(ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "malignant")) +
+            geom_point(size = 0.05) +
+            xlab("UMAP 1") +
+            ylab("UMAP 2") +
+            theme_classic() +
+            scale_color_manual(values=c("#606060","darkred", "orange")) +
+            guides(color=guide_legend(override.aes=list(size=3))) +
+            theme(text = element_text(size=24), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) )
+ggsave(filename = paste0("UMAP_control_malignant_ME_patient_wise_os.pdf"), path = out_path, width =14 ,height =12 ,device = "pdf", useDingbats=F)
+
+# Figure 1H)
+print(ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "Broad_cell_identity")) +
+            geom_point(size = 0.05) +
+            xlab("UMAP 1") +
+            ylab("UMAP 2") +
+            theme_bw() +
+            facet_wrap("malignant", ncol=3)+
+            scale_color_manual(values=colors) +
+            guides(color=guide_legend(override.aes=list(size=3))) +
+            theme(text = element_text(size=24), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) )
+ggsave(filename = paste0("UMAP_Broad_cell_identity_split_control_malignant_ME.pdf"), path = out_path, width =24 ,height =7 ,device = "pdf", useDingbats=F)
+
+```
+
+## Figure 2
+
+
+```{r }
+# Associated metadata and DE results can be found in Source data 2
+metadata <- read.csv(metadata_Fig2, stringsAsFactor=FALSE)
+umap_val <- "umap"
+
+# Figure 2A)
+metadata$Broad_cell_identity <- factor(metadata$Broad_cell_identity, levels=cell_type_order[which(cell_type_order %in% unique(metadata$Broad_cell_identity))])
+print(ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "Broad_cell_identity")) +
+        geom_point(size = 0.05) +
+        xlab("UMAP 1") +
+        ylab("UMAP 2") +
+        theme_classic() +
+        scale_color_manual(values=colors[which(cell_type_order %in% unique(metadata$Broad_cell_identity))]) +
+        guides(color=guide_legend(override.aes=list(size=3))) +
+        theme(text = element_text(size=12)) )
+ggsave(filename = paste0("UMAP_Broad_cell_identity_HSPC_Myeloid.pdf"), path = out_path, width =12 ,height =7 ,device = "pdf", useDingbats=F)
+
+
+# Figure 2B)
+print(ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "samples")) +
+        geom_point(size = 0.05) +
+        xlab("UMAP 1") +
+        ylab("UMAP 2") +
+        theme_classic() +
+        scale_color_manual(values=samplecolors) +
+        guides(color=guide_legend(override.aes=list(size=3))) +
+        theme(text = element_text(size=14)) )
+ggsave(filename = paste0("UMAP_samples_HSPC_Myeloid.pdf"), path = out_path, width =12 ,height =7 ,device = "pdf", useDingbats=F)
+
+#Figure 2C)
+print(ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "Inflammation program 1")) +
+        geom_point(size = 0.05) +
+        xlab("UMAP 1") +
+        ylab("UMAP 2") +
+        theme_classic() +
+        viridis::scale_fill_viridis(option = "D") +
+        theme(text = element_text(size=14)) )
+ggsave(filename = paste0("UMAP_inflammation_1_HSPC_Myeloid.pdf"), path = out_path, width =9 ,height =7 ,device = "pdf", useDingbats=F)
+
+print(ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "Inflammation program 2")) +
+        geom_point(size = 0.05) +
+        xlab("UMAP 1") +
+        ylab("UMAP 2") +
+        theme_classic() +
+        viridis::scale_fill_viridis(option = "D") +
+        theme(text = element_text(size=14)) )
+ggsave(filename = paste0("UMAP_inflammation_1_HSPC_Myeloid.pdf"), path = out_path, width =9 ,height =7 ,device = "pdf", useDingbats=F)
+
+
+# Figure 2D)
+# re-plot Volcano plots malignant adult/pediatric - combine in one panel
+# load volcano DE files 
+DE_genes_volcano_adult <- readRDS(paste0(out_path1,"07-DE-ad_ped_AML_Cntrl_v3_malignant_subsampled500/ME_AML_vs_Control_malignant_cells_adult/DE_genes_volcano_list.rds"))
+DE_genes_volcano_ped <- readRDS(paste0(out_path1,"07-DE-ad_ped_AML_Cntrl_v3_malignant_subsampled500/ME_AML_vs_Control_malignant_cells_pediatric/DE_genes_volcano_list.rds"))
+
+# HSPC
+p1 <- EnhancedVolcano(DE_genes_volcano_adult[["HSPC"]],
+    lab = rownames(DE_genes_volcano_adult[["HSPC"]]),
+    x = 'avg_logFC',
+    y = 'p_val_adj',
+    selectLab= c("CD79A", "CD79B", "IGLL1", "VPREB3", "VPREB1", "DNTT", "HLA-DRA", 
+                  "HLA-DPB1", "S100A10", "CRIP1", "CXCL8", "IRF2BP2", "KLF2", "KLF6", "ANKRD28", "TENT5A"),
+    title = "HSPC adult",
+    drawConnectors=TRUE,
+    col=c("grey","grey","grey","red3"),
+    ylab = bquote(~-Log[10]~ 'P adj'),
+    subtitle = NULL,
+    pCutoff = 5e-2,
+    FCcutoff=0.25)
+
+p2 <- EnhancedVolcano(DE_genes_volcano_ped[["HSPC"]],
+    lab = rownames(DE_genes_volcano_ped[["HSPC"]]),
+    x = 'avg_logFC',
+    y = 'p_val_adj',
+    selectLab= c("CD79A", "CD79B", "IGLL1", "VPREB3", "VPREB1", "DNTT", "HLA-DRA", "HLA-DMA",
+                 "CD74", "HLA-DPB1", "HLA-DPA1","S100A10", "CRIP1", "CXCL8", "IRF2BP2", "KLF2", "KLF6", "ANKRD28", "TENT5A"),
+    title = "HSPC pediatric",
+    drawConnectors=TRUE,
+    col=c("grey","grey","grey","red3"),
+    ylab = bquote(~-Log[10]~ 'P adj'),
+    subtitle = NULL,
+    pCutoff = 5e-2,
+    FCcutoff=0.25)
+
+cowplot::plot_grid(plotlist=list(p1,p2),ncol=2,nrow=1)
+
+ggsave(paste0("Volcano_plot_adult_pediatric_MAST_HSPC_age_adj.pdf"), path=out_path, device="pdf", height=7, width=12)
+
+# Figure 2E)
+#Myeloid
+p1 <- EnhancedVolcano(DE_genes_volcano_adult[["Myeloid"]],
+    lab = rownames(DE_genes_volcano_adult[["Myeloid"]]),
+    x = 'avg_logFC',
+    y = 'p_val_adj',
+    selectLab= c("HLA-DRB1", "CTSS", "S100A12", "HLA-DQ1", "HLA-DPB1", "HLA-DPA1", "S100A4", "HLA-DQB1", "HLA-DMA",
+                   "HLA-DMB", "ANKRD28", "TENT5A", "IFI27",  "IFI44L", "ISG15", "IRF2BP2", "CRIP1", "KLF2"),
+    title = "Myeloid adult",
+    drawConnectors=TRUE,
+    col=c("grey","grey","grey","red3"),
+    ylab = bquote(~-Log[10]~ 'P adj'),
+    subtitle = NULL,
+    pCutoff = 5e-2,
+    FCcutoff=0.25)
+
+p2 <- EnhancedVolcano(DE_genes_volcano_ped[["Myeloid"]],
+    lab = rownames(DE_genes_volcano_ped[["Myeloid"]]),
+    x = 'avg_logFC',
+    y = 'p_val_adj',
+    selectLab= c("S100A12", "HLA-DQA2", "HLA-DPA1", "S100A10", "S100A6", "HLA-DQA1", "HLA-DRA", "ANKRD28", "KLF2",
+                 "KLF6", "ZFP36L2", "IRF2BP2", "TENT5A"),
+    title = "Myeloid pediatric",
+    drawConnectors=TRUE,
+    col=c("grey","grey","grey","red3"),
+    ylab = bquote(~-Log[10]~ 'P adj'),
+    subtitle = NULL,
+    pCutoff = 5e-2,
+    FCcutoff=0.25)
+
+cowplot::plot_grid(plotlist=list(p1,p2),ncol=2,nrow=1)
+
+ggsave(paste0("Volcano_plot_adult_pediatric_MAST_Myeloid_age_adj.pdf"), path=out_path, device="pdf", height=7, width=12)
+
+```
+
+## Figure 3
+
+```{r}
+# B cell colors:
+b_colors <- c(brewer.pal(9, "YlGnBu")[5], brewer.pal(3, "YlOrRd"),brewer.pal(9,"Reds")[c(3,5,8,9)],"#673147", "#301934")
+names(b_colors) <-c("LymP","Pro-B", "Pre-B","Naive B", "Activated AP-1", "Activated NFkB", "Memory","Atypical memory", "Plasmablast", "Plasma cell")
+umap_val <- "UMAPndim20nn20"
+# Associated metadata and DE results can be found in Source data 3
+# Figure 3A) B cell UMAP split ap_aml
+
+metadata <- FetchData(seurat_obj, vars=c(colnames(seurat_obj@meta.data), paste0(umap_val,"_1"), paste0(umap_val,"_2")))
+
+metadata$ap_aml <- factor(metadata$ap_aml, levels=c("Control", "adult_AML", "pediatric_AML"))
+metadata$Cell_type_identity <- factor(metadata$Cell_type_identity , levels=names(b_colors))
+
+# plot UMAP split by group
+ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "Cell_type_identity")) +
+  geom_point(size = 0.1) +
+  xlab("UMAP_1")+
+  ylab("UMAP_2")+
+  theme_bw()+
+  facet_wrap("ap_aml", ncol=3)+
+  scale_color_manual(values=b_colors) +
+  guides(color=guide_legend(override.aes=list(size=3))) +
+  theme(text = element_text(size=16), panel.grid.major = element_blank(), panel.grid.minor = element_blank() )
+ggsave("UMAP_B_Cell_type_identity_ap_aml.pdf", path=out_path, height=5, width=14, device="pdf")
+
+# Figure 3B) Quantification atypical B cells
+count <- metadata %>% filter(malignant!="malignant") %>% group_by(samples, aml) %>% count(Cell_type_identity) %>% mutate(number_cells=sum(n), percent=100*(n/sum(n)))
+count <- count %>% filter(Cell_type_identity=="FCRL5+ atypical memory" & number_cells >= 50) # remove patients with less than 50 cells in the B cell compartment
+count$aml <- factor(count$aml, factor=c("Control", "AML"))
+
+ggplot(count, aes(x=aml, y=percent, fill=aml))+
+  geom_boxplot(outlier.color="white")+ # remove duplication of points from jitter 
+  geom_jitter(height=0.05, width=0.1, color="black")+
+  scale_fill_manual(values=brewer.pal(3,"RdBu")[c(3,1)])+
+  theme_classic()+
+  xlab("Group") + 
+  ylab("Percent Atypical B cells")+
+  ggpubr::stat_compare_means()
+ggsave("Atypical_B_cell_quantification_AML_vs_Control.pdf", path=out_path, device="pdf")
+
+
+# Figure 3C - Alliance and TARGET correlations - signature genes can be found in Supplementary Table 6
+# load signatures:
+signatures <- readRDS(bulk_signature_path)
+
+# load average signature genes log2(FPKM+1), calculation: 
+# signature <- bulk %>% 
+#         filter(hgnc_symbol %in% sigs_list[[i]]) %>%
+#         column_to_rownames("hgnc_symbol") %>% 
+#         mutate_if(is.numeric, function(x) x+1) %>%
+#         log2() %>%
+#         colMeans() %>%
+#         as.data.frame()
+
+ggscatter(signatures[["TCGA"]], x = "inflammation_adult", y = "atypical_B_cells",
+    add = "reg.line", 
+    conf.int = TRUE,
+    add.params = list(color = "blue",
+                        fill = "lightgray"))+
+  stat_cor(method = "pearson")  
+ggsave("Pearson_Correlation_TCGA_inflammation_score_atypical_B_score.pdf", path=out_path, device="pdf", height=5, width=7)
+
+ggscatter(signatures[["BEAT_AML"]], x = "inflammation_pediatric", y = "atypical_B_cells",
+    add = "reg.line",
+    conf.int = TRUE,
+    add.params = list(color = "blue",
+                        fill = "lightgray")) +
+  stat_cor(method = "pearson")
+ggsave("Pearson_Correlation_TCGA_inflammation_score_atypical_B_score.pdf", path=out_path, device="pdf", height=5, width=7)
+
+
+
+# Figure 3F) Fold Change heatmap atypical B cells
+B_genes_annotate <- c("CD83","JUND","EZR","NR4A3","CD79A","FOSB","LITAF","NFKB2",
+                      "ISG15","FOS","IRF2BP2","ITGB2","TGFB1","IRF8","NR4A2","CD69",
+                      "SELL","LTB", "TXNIP", "CD79B", "PRKCB", "BANK1","FCRL1" )
+
+genes <- read.csv(Atypical_B_DE_path,stringsAsFactors=FALSE)
+genes$X <- ifelse(genes$X=="9-Mar", "MARCH9", ifelse(genes$X=="1-Mar", "MARCH1", genes$X))
+genes <- genes[order(-genes$avg_logFC),]
+genes$X <- factor(genes$X, levels=genes$X)
+genes$highlight <- ifelse(genes$X %in% B_genes_annotate, as.character(genes$X), "")
+
+
+ggplot(genes, aes(x=X, y=1, fill=avg_logFC))+
+  geom_tile()+
+  theme_classic()+
+  scale_x_discrete(labels=genes$highlight, breaks=genes$highligh)+
+  theme( axis.text.y=element_blank(), axis.ticks.y=element_blank(), axis.line = element_blank(), legend.position="bottom", axis.text.x=element_text(angle = 90, vjust = 0.5, hjust=1))+
+  xlab("")+ylab("")+
+  scale_fill_gradientn(colours=colorRampPalette(rev(brewer.pal(n = 11, name ="RdBu")))(100))
+ggsave("Fold_Change_heatmap_highlight_horizontal_v2.pdf",device="pdf",height=2,width=10)
+
+# Figure 3G) CD72 violin plot w gitter
+# use HLA-DR-DP-DQ-1018 to exclude samples with old ADT panel: 
+DefaultAssay(s_obj) <- "ADT"
+data <-FetchData(s_obj,  vars=c("CD72-0419","HLA-DR-DP-DQ-1018", colnames(s_obj@meta.data), "UMAPndim20nn20_1", "UMAPndim20nn20_2")) # nolint
+data_abc <- data %>% filter(Cell_type_identity=="FCRL5+ atypical memory") 
+
+#filter samples with old panel
+filter_samples <- data_abc %>% 
+                  group_by(samples) %>% 
+                  summarize(sum_HLA=sum(`HLA-DR-DP-DQ-1018`)) %>% 
+                  column_to_rownames("samples") %>%
+                  filter(sum_HLA>0)
+
+# plot violin plots for these patients:
+data_abc <- data_abc %>% filter(samples %in% rownames(filter_samples)) %>% mutate(aml=ifelse(samples %in% stringr::str_subset(unique(data_abc$samples),"Control"),"Control","AML"))
+data_abc$aml <- factor(data_abc$aml, levels=c("Control","AML"))
+
+ggplot(data_abc, aes(x=aml,y=`CD72-0419`, fill=aml))+
+  geom_violin()+
+  geom_boxplot(width=0.2, alpha=0.2)+
+  geom_jitter(size=0.2,width=0.2,height=0.2,color="black")+
+  theme_classic()+
+  scale_fill_manual(values=brewer.pal(3,"RdBu")[c(3,1)])+
+  ggpubr::stat_compare_means()
+ggsave("CD72_ADT_violin_ABC.pdf",device="pdf",height=5,width=4)
+
+```
+## Figure 4
+```{r}
+# Associated metadata and DE results can be found in Source data 4
+# Figure 4A) T/NK cell UMAP split ap_aml
+
+# T cell colors: 
+ct.cols <- c(brewer.pal(9, "Greens")[c(3,5,7,9)], brewer.pal(9, "RdPu")[c(5,7,8,9)],brewer.pal(9,"Blues")[c(6,8)], "#4A1539", "grey","#FFC40C", "#EEAA0D", "#DE900F", "#CD7710", "#BD5D12")
+names(ct.cols) <- c("CD4+ Naive","CD4+ TCM", "CD4+ Activated","Treg", 
+                      "CD8+ Naive", "CD8+ GZMK+","CD8+ IFN+", "CD8+ Cytotoxic", "CD8+ NK-like", "CD8+ TRM",
+                      "MAIT", "gd T",
+
+# load data
+seurat_obj <- readRDS(metadata_path_T_NK) # s_obj <- readRDS(paste0(out_path1,"R-Figure4-T_cells_no_cc_reg/s_obj_T_NK_wo_cluster15_final.rds"))
+
+umap_val <- "UMAPndim20nn20"
+metadata <- FetchData(seurat_obj, vars=c(colnames(seurat_obj@meta.data), paste0(umap_val,"_1"), paste0(umap_val,"_2"))))
+# plot
+
+metadata$ap_aml <- factor(metadata$ap_aml, levels=c("Control","adult_AML", "pediatric_AML"))
+ggplot(shuf(meta_t_ADT), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "Cell_type_identity")) +
+  geom_point(size = 0.1) +
+  xlab("UMAP_1")+
+  ylab("UMAP_2")+
+  theme_bw()+
+  facet_wrap("ap_aml", ncol=3)+
+  scale_color_manual(values=ct.cols) +
+  guides(color=guide_legend(override.aes=list(size=3))) +
+  theme(text = element_text(size=16), panel.grid.major = element_blank(), panel.grid.minor = element_blank() )
+ggsave("UMAP_T_NK_Cell_type_identity_ap_aml.pdf", path=out_path, height=5, width=16, device="pdf")
+
+# Figure 4B, C) Quantification T cells ap_aml_age
+# load helper function:
+source("/gpfs/data/aifantislab/home/nadorb01/common_scripts/Cell_type_quantification_function.r")
+# only include T cells in fractions
+plotlist <- quantify_cell_types_per_sample(metadata=(metadata %>% filter(malignant!="malignant") %>% filter(Cell_type_identity %in% names(ct.cols)[1:12])), 
+                                            ident='samples', 
+                                            min_cell_ident=50,
+                                            group='ap_aml', 
+                                            group_levels=c("control_19to26yrs", "control_39to53yrs", "pediatric_AML", "adult_AML"),  
+                                            cell_type_var='Cell_type_identity', 
+                                            stats=TRUE, 
+                                            group_comparisons=list(c("control_19to26yrs", "control_39to53yrs"),c("control_19to26yrs", "pediatric_AML"), c("control_39to53yrs", "adult_AML"), c("pediatric_AML", "adult_AML")), 
+                                            save_percentages=TRUE,
+                                            file_name=paste0(out_path, "Quantification_T_min_50.csv"),
+                                            p_output_format="p.signif",
+                                            group_colors=group_colors)
+
+# B) CD8+ Cytotoxic
+plotlist[["CD8+ Cytotoxic"]]
+ggsave("CD8pos_cytotoxic_quantification_ap_aml.pdf", path=out_path, device="pdf")
+
+# C) Treg
+plotlist[["Treg"]]
+ggsave("Treg_quantification_ap_aml.pdf", path=out_path, device="pdf")
+
+
+# Figure 4D, E) -  Quantification T cells inflammation group pediatric AML
+plotlist <- quantify_cell_types_per_sample(metadata=(metadata %>% filter(malignant!="malignant") %>% filter(ap_aml_age %in% c("control_19to26yrs","pediatric_AML")) %>% filter(Cell_type_identity %in% names(ct.cols)[1:12])), 
+                                            ident='samples', 
+                                            min_cell_ident=50,
+                                            group='inflammation_group', 
+                                            group_levels=c("Inflammation_low","Inflammation_high"),  
+                                            cell_type_var='Cell_type_identity', 
+                                            stats=TRUE, 
+                                            group_comparisons=NA, 
+                                            save_percentages=TRUE,
+                                            file_name=paste0(out_path, "T_cell_quantifications_ad_ped_by_inflammation_group_min_50_cells_patient.csv"),
+                                            p_output_format="p.signif",
+                                            group_colors=brewer.pal(9,"RdBu")[c(8,2)])
+
+# D) Treg
+plotlist[["Treg"]]
+ggsave("Treg_quantification_pediatric_inflammation_group.pdf", path=out_path, device="pdf")
+
+# E) GZMK+ CD8+ T cells
+plotlist[["CD8+ GZMK+"]]
+ggsave("CD8pos_GZMKpos_quantification_pediatric_inflammation_group.pdf", path=out_path, device="pdf")
+
+
+# Figure 4F) Heatmap TPex
+
+# heatmap data:
+CD8 <- c( "CD8+ Naive", "CD8+ GZMK+","CD8+ IFN+", "CD8+ Cytotoxic", "CD8+ NK-like", "CD8+ TRM")
+
+Tpex_genes_full <- read.csv(Tpex_gene_list_path, stringsAsFactors=FALSE, header=FALSE)
+Tpex_genes_full <- list(Tpex_full=Tpex_genes_full$V1 )
+Tpex_genes_full$Tpex_full <- gsub(" ","", Tpex_genes_full$Tpex_full)
+
+plot <- FetchData(seurat_obj, vars=c("Cell_type_identity",Tpex_genes_full$Tpex_full )) %>% 
+              filter(Cell_type_identity %in% CD8)
+
+library(data.table)
+current_data <- setDT(plot)
+current_mean <- current_data[, lapply(.SD, mean), by = .(Cell_type_identity), .SDcols = 2:ncol(current_data)]
+current_mean <- as.data.frame(current_mean) %>% column_to_rownames("Cell_type_identity")
+
+current_mean <- current_mean[names(ct.cols[5:10]),]
+# make heatmap for the groups:
+
+anno <- metadata %>% select(Cell_type_identity) %>% as.data.frame() %>% remove_rownames() %>% unique() 
+rownames(anno) <- anno$Cell_type_identity
+
+anno_cols <- list(Cell_type_identity=ct.cols[5:10])
+
+my_breaks= unique(c(seq(-3, 3, length.out=100)))
+pdf(paste0(out_path, "/Heatmap_Tpex_markers_CD8.pdf"), onefile=TRUE, height=4, width=5)
+pheatmap::pheatmap(t(current_mean),color = colorRampPalette(rev(brewer.pal(n = 11, name ="RdBu")))(100), breaks=my_breaks,show_rownames=TRUE, annotation_col=anno, annotation_colors=anno_cols, scale="row",fontsize_row =7, cluster_cols=FALSE, cluster_rows=FALSE)
+dev.off()
+
+# Figure 4G) pie charts TCR
+# load TCR metadata:
+metadata <- read.csv(metadata_path_TCR, stringsAsFactor=FALSE)
+col_cloneType <- c("#0348A6","#FFB433", "#FF4B20")
+names(col_cloneType) <- c("Small (0 < X <= 0.01)", "Large (0.01 < X <= 0.1)",  "Hyperexpanded (0.1 < X <= 1)")
+
+
+# pie charts:
+library(scales)
+blank_theme <- theme_minimal()+
+  theme(axis.title.x = element_blank(),
+      axis.title.y = element_blank(),
+      axis.text.x=element_blank(),
+      panel.border = element_blank(),
+      panel.grid=element_blank(),
+      axis.ticks = element_blank(),
+      plot.title=element_text(size=14, face="bold")
+  )
+
+
+count <- metadata %>% group_by(ap_aml_age) %>% dplyr::count(cloneType)
+count$cloneType <- factor(count$cloneType, levels = names(col_cloneType))
+count$ap_aml_age <-  factor(count$ap_aml_age, levels=c("Control_19to22","pediatric_AML","Control_42to53","adult_AML"))
+
+# remove cells with unknown clonetype
+count <- count %>% filter(!is.na(cloneType))
+
+pie_list <- list()
+for (s in levels(count$ap_aml_age)){
+    count1 <- count %>% filter(ap_aml_age == eval(s))
+    matching <- names(col_cloneType)[which( names(col_cloneType) %in% count1$cloneType)]
+    count1 <- count1[match(rev(matching), count1$cloneType),]
+
+    pie_list[[s]] <- ggplot(count1, aes(x="", y=n, fill=cloneType))+
+                        geom_bar(width = 1, stat = "identity" , show.legend = FALSE) + 
+                        coord_polar("y", start=0) +
+                        scale_fill_manual(values=col_cloneType, na.value="grey") + 
+                        blank_theme +
+                          theme( plot.title = element_text(size = 8)) + 
+                          ggtitle(s)+
+                          geom_text(aes(y = n/dim(count1)[1] + c(0, cumsum(n)[-length(n)]), 
+                                    label = percent(n/sum(n))), size=2)
+}
+
+pie_list[["legend"]] <- cowplot::get_legend(ggplot(count %>% filter(ap_aml_age=="adult_AML"), aes(x="", y=n, fill=cloneType))+geom_bar(width = 1, stat = "identity")+scale_fill_manual(values=col_cloneType, na.value="grey"))
+
+cowplot::plot_grid(plotlist=pie_list, ncol=5,nrow=1)
+ggsave("PieCharts_CloneType_ap_aml_age_wo_NA.pdf", path=out_path, device="pdf", height=2.5, width=10)
+
+
+# Figure 4H) UMAP TCR data
+metadata$Identity <- factor(metadata$Identity, levels=names(ct.cols)[1:12])
+ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "Identity")) +
+  geom_point(size = 0.1) +
+  theme_classic()+
+  scale_color_manual(values=ct.cols[1:12]) +
+  guides(color=guide_legend(override.aes=list(size=3))) +
+  theme(text = element_text(size=16)) +
+  xlab("UMAP_1") +
+  ylab("UMAP_2")
+ggsave(filename = paste0("UMAP_T_cells_Cell_type_identity.pdf"), path = out_path, width =14 ,height =10 ,device = "pdf", useDingbats=F)
+
+# Figure 4I) split UMAP clones
+
+# plot UMAP:
+umap_val <- "UMAPndim20nn20"
+metadata$cloneType <- factor(metadata$cloneType, levels=names(col_cloneType))
+
+metadata$ap_aml <- factor(metadata$ap_aml, levels=c("Control", "adult_AML","pediatric_AML"))
+ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "cloneType")) +
+  geom_point(size = 0.1) +
+  theme_bw()+
+  facet_wrap("ap_aml", ncol=3)+
+  scale_color_manual(values=col_cloneType, na.value="grey") +
+  guides(color=guide_legend(override.aes=list(size=3))) +
+  theme(text = element_text(size=12), panel.grid.major = element_blank(), panel.grid.minor = element_blank() ) +
+  xlab("UMAP_1") +
+  ylab("UMAP_2")
+
+ggsave(filename = paste0("UMAP_T_cells_ConeType_final_ap_aml.pdf"), path = out_path, width =18 ,height =5 ,device = "pdf", useDingbats=F)
+
+
+# Figure 4J) AML0134 clones
+
+metadata %>% filter(samples=="AML0134") %>% count(CTaa) %>% arrange(-n) %>% filter(n>5)
+meta_t_0134 <- metadata %>% filter(samples=="AML0134") %>% mutate(top_clonotypes=ifelse(CTaa=="CAVASGGYQKVTF_CASSPSEPGTGAYEQYF", "CAVASGGYQKVTF_CASSPSEPGTGAYEQYF (n=81)",
+                                                                                  ifelse(CTaa=="CALNNDYKLSF_CASSYFPPGLGSYNEQFF","CALNNDYKLSF_CASSYFPPGLGSYNEQFF (n=47)",
+                                                                                  ifelse(CTaa=="NA_CASSPSEPGTGAYEQYF","NA_CASSPSEPGTGAYEQYF (n=40)",
+                                                                                  ifelse(CTaa=="CALSEAGSARQLTF_CASSVGQSTDTQYF", "CALSEAGSARQLTF_CASSVGQSTDTQYF (n=39)",
+                                                                                  ifelse(CTaa=="NA_CASSYFPPGLGSYNEQFF", "NA_CASSYFPPGLGSYNEQFF (n=36)", "Others (n=909)"))))))
+meta_t_0134$top_clonotypes <- factor(meta_t_0134$top_clonotypes, levels=c("CAVASGGYQKVTF_CASSPSEPGTGAYEQYF (n=81)","CALNNDYKLSF_CASSYFPPGLGSYNEQFF (n=47)","NA_CASSPSEPGTGAYEQYF (n=40)","CALSEAGSARQLTF_CASSVGQSTDTQYF (n=39)", "NA_CASSYFPPGLGSYNEQFF (n=36)","Others (n=909)" ))
+
+# quantify cell types in top clones:
+
+count <- meta_t_0134 %>% group_by(top_clonotypes) %>% dplyr::count(Identity)
+count$Identity <- factor(count$Identity, levels=names(ct.cols))
+count$top_clonotypes <- factor(count$top_clonotypes, levels=rev(c("CAVASGGYQKVTF_CASSPSEPGTGAYEQYF (n=81)","CALNNDYKLSF_CASSYFPPGLGSYNEQFF (n=47)","NA_CASSPSEPGTGAYEQYF (n=40)","CALSEAGSARQLTF_CASSVGQSTDTQYF (n=39)", "NA_CASSYFPPGLGSYNEQFF (n=36)","Others (n=909)" )))
+
+ggplot((count %>% filter(!is.na(top_clonotypes))%>% filter(!(Identity %in% c("MAIT","gd T")))), aes(x=top_clonotypes, y=n, fill=Identity))+
+    geom_bar(stat="identity", position="fill")+
+    scale_fill_manual(values=ct.cols) +
+    theme_classic()+
+    ylab("Percent Cell Type") +
+    ggtitle("AML0134") +
+    guides(color=guide_legend(override.aes=list(size=3))) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) + coord_flip()
+ggsave(filename = "Barplot_Identity_AML0134_top_clonotypes_wo_NA_cf_wo_gd_MAIT.pdf", path = out_path, width=10 ,height =3.5 ,device = "pdf", useDingbats=F)
+
+
+# Figure 4K) TCR CPK Liu paper
+bcr_tcr_anno <- read.csv(TCR_BCR_Liu_data, stringsAsFactor=FALSE)
+
+median <- bcr_tcr_anno %>% filter(age.group=="Adults") %>% summarize(median_adult=median(inflammation_adult))
+top_tertile<- quantile( (bcr_tcr_anno %>% filter(age.group=="Children") %>% .$inflammation_pediatric),probs=seq(0,1,1/3)  )[3]
+top_tertile_infants<- quantile( (bcr_tcr_anno %>% filter(age.group=="Infants") %>% .$inflammation_pediatric),probs=seq(0,1,1/3)  )[3]
+
+bcr_tcr_anno$group <- ifelse(bcr_tcr_anno$inflammation_adult>median[1,1] & bcr_tcr_anno$age.group == "Adults", "Inflammation_high",
+                        ifelse(bcr_tcr_anno$age.group=="Adults", "Inflammation_low",
+                        ifelse(bcr_tcr_anno$inflammation_pediatric>top_tertile & bcr_tcr_anno$age.group == "Children", "Inflammation_high",
+                        ifelse(bcr_tcr_anno$age.group == "Children", "Inflammation_low",
+                        ifelse(bcr_tcr_anno$inflammation_pediatric>top_tertile_infants, "Inflammation_high", "Inflammation_low")))))
+bcr_tcr_anno$group<- factor(bcr_tcr_anno$group, levels=c("Inflammation_low","Inflammation_high"))
+
+ggplot(bcr_tcr_anno, aes(x=group, y=TCR_CPK, fill=group))+
+    geom_boxplot(outlier.color="white")+
+    geom_jitter(size=0.1, height=0.1, width=0.2, color="black")+
+    scale_fill_manual(values=brewer.pal(9, "Reds")[c(3,7)])+
+    theme_classic()+
+    facet_wrap("age.group", ncol=3)+
+    stat_compare_means()
+ggsave("TCR_clonotype_diversity_age_group_inflammation_high_low.pdf", path=out_path, device="pdf", height=5, width=15)
+
+# split up children into teens and children:
+bcr_tcr_anno$age.group.2 <- ifelse(bcr_tcr_anno$age.group=="Children" & bcr_tcr_anno$Age>=13, "Teens", bcr_tcr_anno$age.group)
+
+bcr_tcr_anno$age.group.2 <- factor(bcr_tcr_anno$age.group.2, levels=c("Infants", "Children", "Teens", "Adults"))
+ggplot(bcr_tcr_anno, aes(x=group, y=TCR_CPK, fill=group))+
+    geom_boxplot(outlier.color="white")+
+    geom_jitter(size=0.1, height=0.1, width=0.2, color="black")+
+    scale_fill_manual(values=brewer.pal(9, "Reds")[c(3,7)])+
+    theme_classic()+
+    facet_wrap("age.group.2", ncol=4)+
+    stat_compare_means()
+ggsave("TCR_clonotype_diversity_age_group_inflammation_high_low_teens.pdf", path=out_path, device="pdf", height=5, width=15)
+
+
+```

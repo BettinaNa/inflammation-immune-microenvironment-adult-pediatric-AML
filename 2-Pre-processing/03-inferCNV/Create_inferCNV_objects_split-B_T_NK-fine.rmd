@@ -1,0 +1,63 @@
+---
+title: "Generate inferCNV objects `r params$sample_name`"
+author: 'User ID: `r Sys.getenv("USER")`'
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    fig_height: 7
+    fig_width: 9
+    keep_md: yes
+    toc: yes
+    df_print: paged
+params:
+  data_path:  "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/10-Missing-plots-new_anno_v3/seurat_obj_ADT.rds" # path to seurat obj with fine cell type annotations
+  out_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/R-infercnv-B-T-NK-fine/" # output path where the outputs will be stored
+  sample_name: "adult_pediatric_AML_B_T_NK_fine"
+---
+
+```{r setup, include=FALSE}
+attach(params) 
+library(Seurat)
+library(future)
+library(dplyr)
+library(tibble)
+library(stringr)
+devtools::load_all("/gpfs/data/aifantislab/home/nadorb01/common_scripts/scooter")
+source("scripts/05_inferCNV/createInferCNVObject_call.R") 
+
+knitr::opts_chunk$set(echo = FALSE,
+                      warning = FALSE, 
+                      message = FALSE, 
+                      fig.path = out_path,
+                      dev = c("png", "pdf"))
+
+plan("multiprocess", workers = 4)
+options(future.globals.maxSize = 64000 * 1024^3 )
+
+# Create output directory
+dir.create(out_path)
+```
+
+## Read data
+
+This is the seurat_object after fine cell type annotation. By running inferCNV on the T, B, and NK cell subsets separately, we are removing cell type
+specific expression patterns that may be falsely interpreted as chromosomal abarrations. 
+
+```{r }
+seurat_obj <- readRDS(data_path)
+
+# use broad cell annotation for subsetting and fine cell types (Cell_type_identity) for annotation of T, B and NK cells: 
+# identites in broad cell types:
+## seurat_obj@meta.data$broad_DE <- ifelse(seurat_obj@meta.data$Broad_cell_identity %in% c("HSC", "GMP", "MEP", "LymP"), "HSPC",
+##                                             ifelse(seurat_obj@meta.data$Broad_cell_identity %in% c("DC precursor", "pDC", "cDC1", "cDC2", "CD14+ monocyte","CD16+ monocyte", "HLA-II+ monocyte", "Granulocyte","CD11c+"), "Myeloid",
+##                                             ifelse(seurat_obj@meta.data$Broad_cell_identity %in% c("Pre-B","Pro-B", "B","Plasmablast", "Plasma cell"), "B",
+##                                             ifelse(seurat_obj@meta.data$Broad_cell_identity %in% c("CD4+ T", "CD8+ T","MAIT", "gd T"), "T", seurat_obj@meta.data$Broad_cell_identity )) ))
+
+cell_types <- c("B", "T", "NK")
+```
+## Generate inferCNV objects for each sample
+```{r generate_inferCNV}
+for (s in cell_types){
+    createInferCNVObject_call_BTNK(seurat_obj=seurat_obj, s=s)
+}
+```

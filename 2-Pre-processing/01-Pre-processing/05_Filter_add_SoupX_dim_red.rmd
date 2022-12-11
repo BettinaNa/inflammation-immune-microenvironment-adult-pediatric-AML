@@ -1,0 +1,288 @@
+---
+title: "Filter Seurat Object, add SoupX count, split individuals for `r params$sample_name`"
+author: 'User ID: `r Sys.getenv("USER")`'
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    fig_height: 7
+    fig_width: 9
+    keep_md: yes
+    toc: yes
+    df_print: paged
+params:
+  out_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/data/"
+  data_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/data/merged_seurat.rds" 
+  SoupX_data_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/data/SoupX_0.05_default/soupX_count_mtx_combined.rds" 
+  scDblFinder_hash_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/data/scDblFinder/hashed_doublets_to_filter_combined.csv" 
+  scDblFinder_nonhash_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/data/scDblFinder_non_hashed/non_hashed_doublets_to_filter_combined.csv" 
+  Souporcell_data_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/data/soupercell/analysis_adj_fin/all_filtered_cells_summary_file.csv"
+  sample_name: "ad_ped_cntrl_v5" 
+  split_obj_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/data/patient_sample_seurat_objects/"
+  samples_remove: "NA"
+  log_file: "log" # log file
+  filter_ADT: FALSE
+---
+
+```{r setup, include=FALSE}
+attach(params) 
+knitr::opts_chunk$set(echo = FALSE,
+                      warning = FALSE, 
+                      message = FALSE, 
+                      fig.path = file.path(out_path, paste0("Filtered-SoupX-", sample_name, "/")),
+                      fig.height = 10, 
+                      fig.width = 15,
+                      dev = c("png", "pdf"))
+```
+
+```{r load_libraries}
+library(future)
+library(Seurat)
+library(stringr)
+library(dplyr)
+library(tibble)
+library(RColorBrewer)
+library(ggplot2)
+source("/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/scripts/helper.R")
+
+# # evaluate Seurat R expressions asynchronously when possible (such as ScaleData) using future package
+plan("multiprocess", workers = 4)
+# # increase the limit of the data to be shuttled between the processes from default 500MB to 50GB
+options(future.globals.maxSize = 64 * 1024^2 *1000)
+
+out_path <- file.path(out_path, paste0("Filtered-SoupX-", sample_name, "/"))
+dir.create(out_path)
+
+```
+
+# Load in full merged seurat_obj
+Object is loaded from `r data_path`.
+
+```{r load_seurat_obj}
+seurat_obj <- readRDS(data_path)
+
+```
+
+# Add SoupX assay to seurat_obj
+SoupX filters ambient RNA from scRNAseq data. We are using the filtered data as a new assys that will be used instead of the 'RNA' assay
+in dimensionality reduction, and DE analysis.
+
+```{r Add_SoupX_count_mtx}
+mtx <- readRDS(SoupX_data_path)
+
+colnames(seurat_obj)[which(!(colnames(seurat_obj) %in% colnames(mtx) ))]
+seurat_obj <- subset(seurat_obj, cells=colnames(seurat_obj)[which(!(colnames(seurat_obj) %in% colnames(mtx) ))], invert=TRUE)
+
+mtx <- mtx[,colnames(seurat_obj)]
+
+seurat_obj[["RNA_soupx"]] <- CreateAssayObject(counts = mtx)
+
+```
+
+# Filter seurat_obj based on scDblFinder results 
+We used scDblFinder package to detect doublets in our data. In hashed libraries we used a method that takes the hashed doublets and identifies intra-patient doublets by association with the doublets identified by hashing, 
+in the 5 single patient libraries, we ran regular doublet detection based on cluster-based generation of artifical doublets.
+
+```{r Filter_scDblFinder}
+scDblFinder_hash <- read.csv(scDblFinder_hash_path, stringsAsFactors=FALSE, row.names=1)
+scDblFinder_nonhash <- read.csv(scDblFinder_nonhash_path, stringsAsFactors=FALSE, row.names=1)
+
+filter <- c(scDblFinder_hash$cell, scDblFinder_nonhash$cell)
+
+num_doublets_in_s_obj <- sum(colnames(seurat_obj) %in% filter)
+cell_doublets <- colnames(seurat_obj)[which(colnames(seurat_obj) %in% filter)]
+
+```
+There are `r num_doublets_in_s_obj` doublets in our current seurat_obj identifies by scDoubletFinder.
+
+
+# Filter seurat_obj based on Souporcell analysis
+Souporcell clusters hashed libraries by genotype without using a reference genotype. By using variants detected in scRNA-seq reads, it is possible to assign cells to their donor of origin and 
+identify cross-genotype doublets that may have highly similar transcriptional profiles. Using this method we can identify doublets and falsely assigned hashes, and filter accordingly.
+
+```{r Filter_Souporcell}
+souporcell_data <- read.csv(Souporcell_data_path, stringsAsFactors=FALSE)
+
+num_souporcell_in_s_obj <- sum(colnames(seurat_obj) %in% souporcell_data$cell)
+cell_souporcell <- colnames(seurat_obj)[which(colnames(seurat_obj) %in% souporcell_data$cell)]
+
+# incorrect hashes
+num_incorrect_hashes <- sum(colnames(seurat_obj) %in% souporcell_data$cell[which(souporcell_data$reason=="incorrect_hash")])
+
+# overlap between scDoubletFinder and Souporcell
+num_overlap <- sum(cell_souporcell %in% cell_doublets)
+
+# unique cells to filter
+cells_filter <- unique(c(cell_doublets, cell_souporcell))
+
+```
+
+There are `r num_souporcell_in_s_obj` cells in the seurat_object that need to be filtered based on Souporcell analysis, out of which
+`r num_incorrect_hashes` cells are filtered due to incorrect hashing annotations.
+`r num_overlap` cells are overlapping between scDblFinder and Souporcell filtering. We are filtering `r length(cells_filter)` out of `r dim(seurat_obj)[2]` cells in total.
+
+```{r filter_doublets_falsely_assigned_hashes}
+seurat_obj <- subset(seurat_obj, cells=cells_filter, invert=TRUE)
+```
+
+
+The final diagnostic seurat_obj has `r dim(seurat_obj)[2]` cells. The object is saved as `r paste0(out_path, "seurat_obj_Dx.rds")`.
+
+```{r save_Dx_seurat_obj}
+seurat_obj@meta.data$ap_aml <- ifelse(seurat_obj@meta.data$samples %in% grep("Control",unique(seurat_obj@meta.data$samples), value=TRUE), "Control",
+                                    ifelse(seurat_obj@meta.data$samples %in% grep("^[AML]*[0-9]{4}$",unique(seurat_obj@meta.data$samples), value=TRUE), "adult_AML", "pediatric_AML"))
+
+saveRDS(seurat_obj, paste0(out_path, "seurat_obj_Dx.rds"))
+```
+
+
+```{r run_dim_reductions}
+DefaultAssay(seurat_obj) <- "RNA_soupx"
+seurat_obj <- dim_reductions_RNA_ADT(seurat_obj, ADT_norm=TRUE)
+```
+
+```{r extract_metadata}
+umap_values <- c("UMAPndim20nn20lognorm","UMAPndim25nn20lognorm","UMAPndim30nn20lognorm", "UMAPndim20nn25lognorm","UMAPndim25nn25lognorm","UMAPndim30nn25lognorm", "UMAPndim20nn30lognorm","UMAPndim25nn30lognorm","UMAPndim30nn30lognorm")
+
+reductions <- vector()
+for (umap_val in umap_values){
+  reductions <- c(reductions,paste0(umap_val, "_1"), paste0(umap_val, "_2"))
+}
+
+# extract metadata and all dimensionality reductions
+metadata <- FetchData(seurat_obj, vars=c(colnames(seurat_obj@meta.data), reductions))
+write.csv(metadata, paste0(out_path, "metadata_",sample_name,".csv"))
+```
+
+```{r define_colors, exclude=TRUE}
+## Define colors
+samplecolors <- c((brewer.pal(9, rev("YlGnBu")))[4:9],(brewer.pal(9, rev("PuBuGn")))[6:9], 
+                  (brewer.pal(9, "YlOrRd"))[3:9], (brewer.pal(9, "YlOrBr"))[3:9],(brewer.pal(9, "Reds"))[3:9], 
+                  (brewer.pal(9, "RdPu"))[3:9],(brewer.pal(9, "Purples"))[3:9], (brewer.pal(9, rev("BuPu")))[2:9])
+order_this <- levels(as.factor(metadata$samples))[c(grep("Control",levels(as.factor(metadata$samples))), 
+                                                    grep("^[AML]*[0-9]{4}$",levels(as.factor(metadata$samples))), 
+                                                    grep("^[AML]*[0-9]{3}$",levels(as.factor(metadata$samples))), 
+                                                    grep("^P",levels(as.factor(metadata$samples))) )]
+names(samplecolors) <- order_this
+
+colourCount = length(unique(metadata$orig.ident))
+getPalette = colorRampPalette(brewer.pal(11, "Paired"))
+
+group_colors <- samplecolors[c(4,13,37)]
+names(group_colors) <- c("Control", "adult_AML", "pediatric_AML")
+```
+
+```{r plot}
+metadata$samples <-  factor(metadata$samples, levels=order_this)
+metadata$ap_aml <- factor(metadata$ap_aml, levels=c("Control", "adult_AML", "pediatric_AML"))
+
+for (umap_val in umap_values){
+
+    print(umap_val)
+    #nFeature_RNA
+    temp_out <- paste0(out_path, umap_val,"/")
+    dir.create(temp_out)
+
+    print(ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "nFeature_RNA")) +
+    geom_point(size = 0.1) +
+    xlab("UMAP_1") +
+    ylab("UMAP_2") +
+    theme_classic()+
+    scale_colour_gradient(low = "lightgrey", high = "red", na.value = "grey50") +
+    theme(text = element_text(size=20), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) )
+    ggsave(filename = paste0(umap_val,"_nFeature_RNA.png"), path = temp_out, width =12, height =10, device = "png")
+
+    #nCount_RNA
+    print(ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "nCount_RNA")) +
+    geom_point(size = 0.1) +
+    xlab("UMAP_1") +
+    ylab("UMAP_2") +
+    theme_classic()+
+    scale_colour_gradient(low = "lightgrey", high = "red", na.value = "grey50") +
+    theme(text = element_text(size=20), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) )
+    ggsave(filename = paste0(umap_val,"_nCount_RNA.png"), path = temp_out, width =12, height =10, device = "png")
+
+    #nCount_RNAsoupx
+    print(ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "nCount_RNA_soupx")) +
+    geom_point(size = 0.1) +
+    xlab("UMAP_1") +
+    ylab("UMAP_2") +
+    theme_classic()+
+    scale_colour_gradient(low = "lightgrey", high = "red", na.value = "grey50") +
+    theme(text = element_text(size=20), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) )
+    ggsave(filename = paste0(umap_val,"_nCount_RNA_soupx.png"), path = temp_out, width =12, height =10, device = "png")
+
+    #nCount_ADT
+    print(ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "nCount_ADT")) +
+    geom_point(size = 0.1) +
+    xlab("UMAP_1") +
+    ylab("UMAP_2") +
+    theme_classic()+
+    scale_colour_gradient(low = "lightgrey", high = "red", na.value = "grey50") +
+    theme(text = element_text(size=20), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) )
+    ggsave(filename = paste0(umap_val,"_nCount_ADT.png"), path = temp_out, width =12, height =10, device = "png")
+
+    #pct_mito
+    print(ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "pct_mito")) +
+    geom_point(size = 0.1) +
+    xlab("UMAP_1") +
+    ylab("UMAP_2") +
+    theme_classic()+
+    scale_colour_gradient(low = "lightgrey", high = "red", na.value = "grey50") +
+    theme(text = element_text(size=20), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) )
+    ggsave(filename = paste0(umap_val,"_pct_mito.png"), path = temp_out, width =12, height =10, device = "png")
+
+    #samples
+    print(ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "samples")) +
+    geom_point(size = 0.1) +
+    xlab("UMAP_1") +
+    ylab("UMAP_2") +
+    theme_classic()+
+    scale_colour_manual(values=samplecolors) +
+    guides(color=guide_legend(override.aes=list(size=5))) +
+    theme(text = element_text(size=20), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) )
+    ggsave(filename = paste0(umap_val,"_samples.png"), path = temp_out, width =16, height =10, device = "png")
+
+    #samples
+    print(ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "samples")) +
+    geom_point(size = 0.1) +
+    xlab("UMAP_1") +
+    ylab("UMAP_2") +
+    theme_bw() +
+    facet_wrap("ap_aml",ncol=3) +
+    scale_colour_manual(values=samplecolors) +
+    guides(color=guide_legend(override.aes=list(size=5))) +
+    theme(text = element_text(size=20), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) )
+    ggsave(filename = paste0(umap_val,"_samples_ap_aml.png"), path = temp_out, width =24, height =7, device = "png")
+
+    #ap_aml
+    print(ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "ap_aml")) +
+    geom_point(size = 0.1) +
+    xlab("UMAP_1") +
+    ylab("UMAP_2") +
+    theme_classic()+
+    scale_colour_manual(values=group_colors) +
+    guides(color=guide_legend(override.aes=list(size=5))) +
+    theme(text = element_text(size=20), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) )
+    ggsave(filename = paste0(umap_val,"_ap_aml.png"), path = temp_out, width =16, height =10, device = "png")
+
+
+
+    # orig.ident
+    print(ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "orig.ident")) +
+    geom_point(size = 0.1) +
+    xlab("UMAP_1") +
+    ylab("UMAP_2") +
+    theme_classic()+
+    guides(color=guide_legend(override.aes=list(size=5))) +
+    scale_colour_manual(values=getPalette(colourCount)) +
+    theme(text = element_text(size=20), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) )
+    ggsave(filename = paste0(umap_val,"_orig.ident.png"), path = temp_out, width =16, height =10, device = "png")
+
+}
+
+```
+
+
+```{r save_seurat_fin_soupx}
+saveRDS(seurat_obj, paste0(out_path, "seurat_obj_Dx_dim_soupX.rds"))
+```

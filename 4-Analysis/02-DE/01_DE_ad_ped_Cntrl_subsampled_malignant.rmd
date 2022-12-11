@@ -1,0 +1,184 @@
+---
+title: "Differential expression analysis `r params$sample_name`"
+author: 'User ID: `r Sys.getenv("USER")`'
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    fig_height: 7
+    fig_width: 9
+    keep_md: yes
+    toc: yes
+    df_print: paged
+params:
+  out_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/"
+  data_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/07-DE-ad_ped_AML_Cntrl_v3/seurat_obj.rds"
+  sample_name: "ad_ped_AML_Cntrl_v3_malignant_subsampled500"
+  subsample: TRUE
+---
+
+```{r setup, include=FALSE}
+attach(params) 
+library(Seurat)
+library(future)
+library(dplyr)
+library(ggplot2)
+library(tibble)
+library(stringr)
+library(MAST)
+library(EnhancedVolcano)
+library(org.Hs.eg.db)
+library(patchwork)
+library(clusterProfiler)
+source("/gpfs/data/aifantislab/home/nadorb01/common_scripts/DE_helper.R")
+
+
+knitr::opts_chunk$set(echo = TRUE, 
+                      warning = FALSE, 
+                      message = FALSE, 
+                      fig.path = file.path(out_path, paste0("07-DE-", sample_name, "/")))
+
+
+
+# enable parallelization
+plan("multiprocess", workers = 4) # 10 cpus
+options(future.globals.maxSize = 59600 * 1024^3) # for 64 Gb RAM, 119200 * 1024^3 for 128GB
+
+# set out_path and create dir 
+out_path1 <- out_path
+out_path <- paste0(out_path, "07-DE-", sample_name, "/")
+if (!dir.exists(out_path)) {dir.create(out_path)}
+
+```
+
+
+```{r read_data}
+seurat_obj <- readRDS(data_path)
+```
+
+```{r ME_malignant_def}
+# split data by malignant and ME
+# run for pediatric and adult together
+cells <- list()
+cells[["me_cells"]] <- seurat_obj@meta.data %>% rownames_to_column("cell") %>% filter(malignant != "malignant") %>% filter(!(samples %in% c("AML3133", "AML006", "AML056", "AML4897") & broad_DE == "Myeloid")) %>% filter(!(samples %in% c("AML3133", "AML006", "AML056", "AML4897","AML025") & broad_DE == "HSPC")) %>% .$cell
+cells[["malignant_cells"]] <- seurat_obj@meta.data %>% rownames_to_column("cell") %>% filter(malignant != "microenvironment") %>% .$cell
+
+## rm genes from X/Y chromosomes ###
+ensembl <- biomaRt::useMart(biomart = "ENSEMBL_MART_ENSEMBL",
+                dataset = "hsapiens_gene_ensembl", host = "jul2018.archive.ensembl.org")
+genes_tbl <- biomaRt::getBM(attributes =
+                c("ensembl_gene_id", "hgnc_symbol", "chromosome_name", "start_position", "end_position"),
+                filters = "hgnc_symbol", values = rownames(seurat_obj), mart = ensembl)
+
+genes_tbl = genes_tbl %>%
+  filter(chromosome_name %in% c( "X", "Y"))
+
+```
+
+
+```{r adult_pediatric_DE}
+seurat_obj@meta.data$aml <- ifelse(str_detect(seurat_obj@meta.data$samples, "Control"), "Control", "AML")
+
+# run for adult and pediatric separately:
+for (n in names(cells)[2]){
+    seurat_obj_me <- subset(seurat_obj, cells=cells[[n]])
+    print(n)
+    print(table(seurat_obj_me@meta.data$malignant))
+
+
+    # split in adult and pediatric
+    cells1 <- list()
+    cells1[["adult"]] <-seurat_obj_me@meta.data %>% rownames_to_column("cell") %>% filter(ap_aml != "pediatric_AML") %>% filter(age_group!="control_19to26yrs") %>% .$cell
+    cells1[["pediatric"]] <- seurat_obj_me@meta.data %>% rownames_to_column("cell") %>% filter(ap_aml != "adult_AML") %>% filter(age_group!="control_39to53yrs") %>% .$cell
+
+    for (a in names(cells1)){
+      s_obj <- subset(seurat_obj_me, cells=cells1[[a]])
+      print(a)
+      print(table(s_obj@meta.data$age_group))
+
+      Idents(s_obj) <- "broad_DE"
+      seurat_obj.list <- SplitObject(s_obj, split.by="ident")
+
+        # keep only HSPC/MYeloid and combined :
+        seurat_obj.list <- seurat_obj.list[which(names(seurat_obj.list) %in% c("HSPC", "Myeloid"))]
+
+        # subsample:
+        if(subsample){
+        for (b in names(seurat_obj.list)){
+            # subsample to 500 cells per patient and exclude patients where we don't have those
+            set.seed(1234)
+            aml_samples <- grep("Control",unique(s_obj@meta.data$samples), invert=TRUE, value=TRUE)
+            cells_control <- seurat_obj.list[[b]]@meta.data %>% rownames_to_column("cell") %>% filter(!(samples %in% aml_samples)) %>% .$cell
+            cells_aml <- seurat_obj.list[[b]]@meta.data %>% rownames_to_column("cell") %>% filter(samples %in% aml_samples) %>% group_by(samples) %>% sample_n(500, replace = TRUE) %>% .$cell %>% unique()
+            write.table(c(cells_control,cells_aml), paste0(out_path, "cells_used_", b, "_", a, ".txt"))
+
+            seurat_obj.list[[b]] <- subset(seurat_obj.list[[b]], cells=c(cells_control,cells_aml))
+        }
+        }
+
+      # re-normalize and re-scale and run DE in ME AML vs Control
+      temp_dir <- paste0(out_path, "AML_vs_Control_",n,"_",a,"/")
+      dir.create(temp_dir)
+      DE_genes <- list()
+      DE_genes_volcano <- list()
+      GO_terms <- list()
+      GO_comparison_up_MF <- list()
+      GO_comparison_down_MF <- list()
+
+
+      for (i in seq_along(names(seurat_obj.list))){
+      
+      print(names(seurat_obj.list)[i])
+      print(table(seurat_obj.list[[names(seurat_obj.list)[i]]]@meta.data$broad_DE))
+
+      all.genes <- rownames(seurat_obj.list[[names(seurat_obj.list)[i]]])[which(rowSums(as.matrix(seurat_obj.list[[names(seurat_obj.list)[i]]]@assays$RNA@counts))>0)]
+      seurat_obj.list[[names(seurat_obj.list)[i]]] <- seurat_obj.list[[names(seurat_obj.list)[i]]] %>% 
+                                  NormalizeData(normalization.method = "LogNormalize", scale.factor = 10000) %>%
+                                  ScaleData(features = all.genes)
+
+      Idents(seurat_obj.list[[names(seurat_obj.list)[i]]]) <- "aml"
+
+      DE_genes[[names(seurat_obj.list)[i]]] <- FindMarkers(seurat_obj.list[[names(seurat_obj.list)[i]]], ident.1 = "AML", min.pct = 0.1,only.pos = FALSE, test.use = "MAST")
+      #filter out X/Y genes due to gender imbalance
+      DE_genes[[names(seurat_obj.list)[i]]] <- subset(DE_genes[[names(seurat_obj.list)[i]]], !(rownames(DE_genes[[names(seurat_obj.list)[i]]]) %in% genes_tbl$hgnc_symbol))
+
+      write.csv(DE_genes[[names(seurat_obj.list)[i]]], paste0(temp_dir, "DE_genes_", n,"_", names(seurat_obj.list)[i],"_",a,"_MAST.csv"))
+
+      DE_genes_volcano[[names(seurat_obj.list)[i]]] <- FindMarkers(seurat_obj.list[[names(seurat_obj.list)[i]]], ident.1 = "AML", min.pct = 0.1, logfc.threshold=0, test.use = "MAST")
+      #filter out X/Y genes due to gender imbalance
+      DE_genes_volcano[[names(seurat_obj.list)[i]]] <- subset(DE_genes_volcano[[names(seurat_obj.list)[i]]], !(rownames(DE_genes_volcano[[names(seurat_obj.list)[i]]]) %in% genes_tbl$hgnc_symbol))
+
+      top_up <- DE_genes_volcano[[names(seurat_obj.list)[i]]] %>% dplyr::filter(avg_logFC > 0.25) %>% dplyr::arrange(p_val_adj)
+      top_down <- DE_genes_volcano[[names(seurat_obj.list)[i]]] %>% dplyr::filter(avg_logFC < 0.25) %>% dplyr::arrange(avg_logFC) %>% dplyr::arrange(p_val_adj)
+
+      p <- EnhancedVolcano(DE_genes_volcano[[names(seurat_obj.list)[i]]],
+        lab = rownames(DE_genes_volcano[[names(seurat_obj.list)[i]]]),
+        x = 'avg_logFC',
+        y = 'p_val_adj',
+        selectLab= c(rownames(top_up)[1:8],rownames(top_down)[1:8]),
+        title = paste0(names(seurat_obj.list)[i],' - ',a,' AML',n,' vs Control'),
+        drawConnectors=TRUE,
+        col=c("black","black","black","red3"),
+        ylab = bquote(~-Log[10]~ 'P adj'),
+        subtitle = NULL,
+        pCutoff = 5e-2,
+        FCcutoff=0.25)
+
+      print(p)
+      ggsave(paste0("Volcano_plot_",names(seurat_obj.list)[i],"_",n,"_",a,"_AML_vs_Control_MAST.pdf"), plot=p, path=temp_dir, device="pdf", height=7, width=10)
+
+      # GO analysis
+      GO_terms[[eval(names(seurat_obj.list)[i])]] <- run_GO(s_obj=seurat_obj.list[[eval(names(seurat_obj.list)[i])]], DE_genes=DE_genes[[eval(names(seurat_obj.list)[i])]], s_name=eval(names(seurat_obj.list)[i]))
+      GO_comparison_down_MF[[eval(names(seurat_obj.list)[i])]] <- GO_terms[[eval(names(seurat_obj.list)[i])]]$down_genes_MF$ID
+      GO_comparison_up_MF[[eval(names(seurat_obj.list)[i])]] <- GO_terms[[eval(names(seurat_obj.list)[i])]]$up_genes_MF$ID
+
+    }
+
+    saveRDS(DE_genes, paste0(temp_dir, "DE_genes_list.rds"))
+    saveRDS(DE_genes_volcano, paste0(temp_dir, "DE_genes_volcano_list.rds"))
+    saveRDS(GO_terms, paste0(temp_dir, "GO_terms_list.rds"))
+    saveRDS(GO_comparison_down_MF, paste0(temp_dir, "GO_comparison_down_MF_list.rds"))
+    saveRDS(GO_comparison_up_MF, paste0(temp_dir, "GO_comparison_up_MF_list.rds"))
+
+    }
+}
+```

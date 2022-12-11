@@ -1,0 +1,394 @@
+---
+title: "Souporcell-`r params$sample_name`"
+author: 'User ID: `r Sys.getenv("USER")`'
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    fig_height: 7
+    fig_width: 9
+    keep_md: yes
+    toc: yes
+    df_print: paged
+params:
+  data_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/data/soupercell/"
+  out_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/data/soupercell/analysis_adj_fin/"
+  merged_metadata_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ped_AML/data/Merge-ped_AML_healthy_merge/metadata_create_ped_AML_healthy_merge.csv"
+  data_path_adult: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/data/adult" # path to the directory with the outs file
+  data_path_pediatric: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/data/pediatric" # path to the directory with the outs file
+  filter_file_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/data/soupercell/analysis_adj/Filter_results_soupercell.txt"
+  log_file: NULL
+  umap_val: "UMAPndim20nn20lognorm"
+  samples_anno: TRUE # BOOLEAN - should samples column be used instaed of hash.ID for PCA annotation
+---
+
+```{r setup, include=FALSE}
+attach(params)
+library(stringr)
+library(ggbiplot)
+library(tibble)
+library(glue)
+library(RColorBrewer)
+library(dplyr)
+theme_set(theme_bw())
+
+knitr::opts_chunk$set(echo = TRUE, 
+                      warning = FALSE, 
+                      message = FALSE, 
+                      fig.path = file.path(paste0(out_path)))
+
+
+
+dir.create(out_path, showWarnings = FALSE)
+yaml::write_yaml(params, glue("{out_path}/params.yml"))
+log_file = file.path(out_path, "log")
+
+
+metadata_dirs <- c(dir(path=data_path_adult,  pattern = "metadata", full.names=TRUE, recursive=TRUE),
+            dir(path=data_path_pediatric,  pattern = "metadata", full.names=TRUE, recursive=TRUE))
+
+cluster_dirs <- dir(path=data_path, pattern="clusters.tsv", full.names=TRUE, recursive=TRUE)
+
+# filter dirs that contain non-relevant clusters
+filter <- read.delim(filter_file_path, header=FALSE)
+matches <- unique (grep(paste(filter$V1,collapse="|"), 
+                        cluster_dirs))
+
+cluster_dirs <- cluster_dirs[-matches]
+           
+```
+## PCA of Souporcell cluster assignment
+PCA showing the first 4 PCs of the normalized cell-by-cluster loss matrix colored by cluster assignment; this includes cells we filtered based on quality.
+
+```{r Souporcell_filtering}
+
+filter_summary_file <- matrix(ncol=3, nrow=0) %>% as.data.frame()
+colnames(filter_summary_file) <- c("sample_name", "cell", "reason")
+
+for (i in seq_along(cluster_dirs)){
+  sample_name <- str_split_fixed(cluster_dirs[i],"/",13)[,12]
+  lib_name <- gsub("__{0-9}.clusters", "", sample_name)
+  cluster_num <- gsub(paste0(lib_name,"_"), "",sample_name) # 5clusters
+  metadata_path <- metadata_dirs[grep(lib_name, metadata_dirs)]#select from metadata_dir with grep
+
+  filter_summary <- matrix(ncol=3, nrow=0) %>% as.data.frame()
+  colnames(filter_summary) <- c("sample_name", "cell", "reason")
+
+
+  print(glue("{lib_name} {cluster_num}"))
+  
+  temp_path <- file.path(out_path, lib_name, cluster_num)
+  dir.create(temp_path, recursive=TRUE)
+
+  print(glue("Data will be saved in {temp_path}"))
+
+  # read in souporcell clustering data
+  s_data <- read.delim(cluster_dirs[i], stringsAsFactors=F)
+
+  # make clear cluster assignments based on singlet and assignment calls in souporcell
+  s_data$clust_assign <- ifelse(s_data$status == "singlet", s_data$assignment, s_data$status)
+
+  # calculate PCA based on normalized cell-by-cluster loss matrix from souporcell
+  s_data.pca <- prcomp(s_data[,str_subset(colnames(s_data), "cluster")], center = TRUE, scale. = FALSE)
+
+  print(summary(s_data.pca))
+
+  # plot first 4 PCs with cluster assignments
+
+  print(ggbiplot(s_data.pca, groups=s_data$clust_assign))
+  ggsave("PCA_PC1_PC2_cell_by_cluster_loss_matrix.pdf", path=temp_path, device="pdf")
+
+  print(ggbiplot(s_data.pca,choices=c(2,3), groups=s_data$clust_assign))
+  ggsave("PCA_PC2_PC3_cell_by_cluster_loss_matrix.pdf", path=temp_path, device="pdf")
+  
+  print(ggbiplot(s_data.pca,choices=c(3,4), groups=s_data$clust_assign))
+  ggsave("PCA_PC3_PC4_cell_by_cluster_loss_matrix.pdf", path=temp_path, device="pdf")
+
+
+  print("Filtering of cells based on quality (from Seurat create step)")
+
+  metadata <- read.csv(metadata_path, stringsAsFactors=F)
+  # filter s_data for cells we are using in our analysis
+  sm_data <- subset(s_data, gsub("-1","", s_data$barcode) %in% gsub(paste0(lib_name,":"), "", metadata$cell) )
+  rownames(sm_data) <- gsub("-1","", sm_data$barcode) 
+  metadata <- subset(metadata, gsub(paste0(lib_name,":"), "", metadata$cell) %in% rownames(sm_data))
+  sm_data <- sm_data[order(gsub(paste0(lib_name,":"), "", metadata$cell)),]
+
+  if(samples_anno){
+      sm_data$hash.ID <- metadata$samples
+  } else{
+      sm_data$hash.ID <- metadata$hash.ID
+  }
+
+  sm_data.pca <- prcomp(sm_data[,str_subset(colnames(sm_data), "cluster")], center = TRUE, scale. = FALSE)
+
+  summary(sm_data.pca)
+  print(ggbiplot(sm_data.pca, groups=sm_data$clust_assign))
+  ggsave("PCA_PC1_PC2_cell_by_cluster_loss_matrix_filtered.pdf", path=temp_path, device="pdf")
+
+  print(ggbiplot(sm_data.pca,choices=c(2,3), groups=sm_data$clust_assign))
+  ggsave("PCA_PC2_PC3_cell_by_cluster_loss_matrix_filtered.pdf", path=temp_path, device="pdf")
+
+  print(ggbiplot(sm_data.pca,choices=c(3,4), groups=sm_data$clust_assign))
+  ggsave("PCA_PC3_PC4_cell_by_cluster_loss_matrix_filtered.pdf", path=temp_path, device="pdf")
+
+  print("Hash annotation based on Seurat HTODemux()")
+  print(ggbiplot(sm_data.pca, groups=sm_data$hash.ID))
+  ggsave("PCA_PC1_PC2_cell_by_cluster_loss_matrix_filtered_hash.ID.pdf", path=temp_path, device="pdf")
+
+  print(ggbiplot(sm_data.pca,choices=c(2,3), groups=sm_data$hash.ID))
+  ggsave("PCA_PC2_PC3_cell_by_cluster_loss_matrix_filtered_hash.ID.pdf", path=temp_path, device="pdf")
+
+  print(ggbiplot(sm_data.pca,choices=c(3,4), groups=sm_data$hash.ID))
+  ggsave("PCA_PC3_PC4_cell_by_cluster_loss_matrix_filtered_hash.ID.pdf", path=temp_path, device="pdf")
+
+
+  final_sm <- merge(sm_data, sm_data.pca$x, by=0)
+  write.csv(final_sm, paste0(temp_path, "/PCA_anno_metadata.csv"))
+
+  print(glue("Based on the quality filtering min 400 genes, max 6000 genes and max 15% mitochondrial reads, we filtered {dim(s_data)[1]-dim(sm_data)[1]} cells, before running further analysis."))
+
+  ## Filtering of doublets and unassigned cells based on Souporcell
+  print("Before filtering doublet and unassigned filtering")
+
+  samplecolors <- brewer.pal(length(unique(metadata$samples)), "Dark2")
+  # this is 36 colors, we can look at it and through out what we don't like
+  height <- (length(unique(metadata$samples))%/%2 + length(unique(metadata$samples))%%2) * 5
+
+  print(ggplot(metadata, aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "samples")) +
+    geom_point(size = 0.05) +
+    xlab("UMAP 1") +
+    ylab("UMAP 2") +
+    ggtitle(umap_val) +
+    scale_color_manual(values=samplecolors) +
+    facet_wrap("samples", ncol=2) +
+    guides(color=guide_legend(override.aes=list(size=3))) +
+    theme(text = element_text(size=16)) )
+  ggsave(paste0("UMAP_patients_per_patient_before_filtering_",sample_name,".pdf"), path=temp_path, device="pdf", height=height, width=11)
+
+  if(sum(str_detect(unique(metadata$samples),"Control")) > 0){
+    metadata$aml <- ifelse(str_detect(metadata$samples,"Control"), "Control", "AML")
+    metadata$aml <- factor(metadata$aml, levels=c("Control", "AML"))
+
+    print(ggplot(metadata, aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "samples")) +
+      geom_point(size = 0.2) +
+      xlab("UMAP 1") +
+      ylab("UMAP 2") +
+      facet_wrap("aml", ncol=2) +
+      ggtitle(umap_val) +
+      scale_color_manual(values=samplecolors) +
+      guides(color=guide_legend(override.aes=list(size=3))) +
+      theme(text = element_text(size=16)) )
+    ggsave(paste0("UMAP_patients_control_AML_before_filtering_",sample_name,".pdf"), path=temp_path, device="pdf", height=5, width=11)
+
+  }
+
+  print(ggplot(metadata, aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "samples")) +
+    geom_point(size = 0.2) +
+    xlab("UMAP 1") +
+    ylab("UMAP 2") +
+    ggtitle(umap_val) + 
+    theme_classic() +
+    scale_color_manual(values=samplecolors) +
+    guides(color=guide_legend(override.aes=list(size=3))) +
+    theme(text = element_text(size=16)) )
+  ggsave(paste0("UMAP_patients_before_filtering_",sample_name,".pdf"), path=temp_path, device="pdf")
+
+  print("Filter doublets")
+  filter1 <- paste0(lib_name, ":", rownames(sm_data)[which(!(sm_data$clust_assign %in% c("doublet", "unassigned")))])
+  filtered <- paste0(lib_name, ":", rownames(sm_data)[which((sm_data$clust_assign %in% c("doublet", "unassigned")))])
+  
+  # make df
+  df <- data.frame(rep(sample_name, length(filtered)), filtered, rep("doublet_unassigned", length(filtered)))
+  colnames(df) <- c("sample_name", "cell", "reason")
+
+  print(glue("Based on Souporcell we have {length(filter1)} doublets and unassigned cells. In this step we are filtering those out, and we are plotting the resulting merged UMAP."))
+  metadata1 <- subset(metadata, metadata$cell %in% filter1)
+
+  print("After filtering:")
+
+
+  print(ggplot(metadata1, aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "samples")) +
+    geom_point(size = 0.05) +
+    xlab("UMAP 1") +
+    ylab("UMAP 2") +
+    ggtitle(umap_val) +
+    scale_color_manual(values=samplecolors) +
+    facet_wrap("samples", ncol=2) +
+    guides(color=guide_legend(override.aes=list(size=3))) +
+    theme(text = element_text(size=16)) )
+  ggsave(paste0("UMAP_patients_per_patient_before_filtering_",sample_name,".pdf"), path=temp_path, device="pdf", height=height, width=11)
+
+  if(sum(str_detect(unique(metadata1$samples),"Control")) > 0){
+    metadata1$aml <- ifelse(str_detect(metadata1$samples,"Control"), "Control", "AML")
+    metadata1$aml <- factor(metadata1$aml, levels=c("Control", "AML"))
+
+    print(ggplot(metadata1, aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "samples")) +
+      geom_point(size = 0.2) +
+      xlab("UMAP 1") +
+      ylab("UMAP 2") +
+      facet_wrap("aml", ncol=2) +
+      ggtitle(umap_val) +
+      scale_color_manual(values=samplecolors) +
+      guides(color=guide_legend(override.aes=list(size=3))) +
+      theme(text = element_text(size=16)) )
+    ggsave(paste0("UMAP_patients_control_AML_before_filtering_",sample_name,".pdf"), path=temp_path, device="pdf", height=5, width=11)
+
+  }
+
+  print(ggplot(metadata1, aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "samples")) +
+    geom_point(size = 0.2) +
+    xlab("UMAP 1") +
+    ylab("UMAP 2") +
+    ggtitle(umap_val) + 
+    theme_classic() +
+    scale_color_manual(values=samplecolors) +
+    guides(color=guide_legend(override.aes=list(size=3))) +
+    theme(text = element_text(size=16)) )
+  ggsave(paste0("UMAP_patients_before_filtering_",sample_name,".pdf"), path=temp_path, device="pdf")
+
+  print("Filtering of incorrectly labelled cells")
+
+  # merge sm_data with filtered metadata
+  sm_data$cell <- paste0(lib_name,":",rownames(sm_data))
+  merged_metadata2 <- merge(metadata1, sm_data, by="cell")
+
+  # make a hash count table to identify the cluster which mostly agrees with the hashtag
+  count <- merged_metadata2 %>% dplyr::group_by(assignment) %>% dplyr::count(samples)
+  count_table <- reshape::cast(count, assignment~samples) 
+  write.csv(count_table, paste0(temp_path, "/count_cell_per_cluster_table.csv"))
+
+  print(count_table)
+
+  assignment_table <- count %>% dplyr::group_by(assignment)  %>% dplyr::summarize(cluster_assignment=samples[which.max(n)]) 
+  assignment_table <- as.data.frame(assignment_table)
+
+  write.csv(assignment_table, paste0(temp_path, "/cluster_assignment_table.csv"))
+  print(assignment_table)
+
+  merged_metadata2$filter3 <- rep(NA, dim(merged_metadata2)[1])
+
+  # manually fix incorrectly annotated clusters for the libraries:
+  if(sample_name == "2019-08-01-count-1_7clusters"){
+    assignment_table <- subset(assignment_table, !(assignment_table$assignment %in% c(1,5:6) ))
+    print(assignment_table)
+    write.csv(assignment_table, paste0(temp_path, "/cluster_assignment_table_adjusted.csv"))
+  }
+
+  if(sample_name == "2019-08-01-count-2_7clusters"){
+    assignment_table <- subset(assignment_table, !(assignment_table$assignment %in% c(2,5:6) ))
+    print(assignment_table)
+    write.csv(assignment_table, paste0(temp_path, "/cluster_assignment_table_adjusted.csv"))
+  }
+
+  if(sample_name == "2019-08-01-count-3_7clusters"){
+    assignment_table <- subset(assignment_table, !(assignment_table$assignment %in% c(0,6) ))
+    print(assignment_table)
+    write.csv(assignment_table, paste0(temp_path, "/cluster_assignment_table_adjusted.csv"))
+  }
+
+  if(sample_name == "2019-08-01-count-4_7clusters"){
+    assignment_table <- subset(assignment_table, !(assignment_table$assignment %in% c(1,3,5) ))
+    print(assignment_table)
+    write.csv(assignment_table, paste0(temp_path, "/cluster_assignment_table_adjusted.csv"))
+  }
+
+  if(sample_name == "2020-08-26-Control4003-c1_5clusters"){
+    assignment_table <- subset(assignment_table, assignment_table$assignment ==4 )
+    print(assignment_table)
+    write.csv(assignment_table, paste0(temp_path, "/cluster_assignment_table_adjusted.csv"))
+  }
+
+  if(sample_name %in% c("2020-08-26-Control4003-c2_5clusters","2020-08-26-Control4003-c3_5clusters")){
+    assignment_table <- subset(assignment_table, assignment_table$assignment ==3 )
+    print(assignment_table)
+    write.csv(assignment_table, paste0(temp_path, "/cluster_assignment_table_adjusted.csv"))
+  }
+
+  for (i in 1:dim(assignment_table)[1]){
+    merged_metadata2$filter3 <- ifelse(merged_metadata2$samples %in% str_subset(merged_metadata2$samples, eval(assignment_table[i,2])) & merged_metadata2$assignment ==eval(assignment_table[i,1]), merged_metadata2$samples, merged_metadata2$filter3)
+  }
+
+  if(lib_name %in% c("2019-08-29-count-1", "2019-08-29-count-2", "2019-09-03-count-1", "2019-09-03-count-2","2019-09-03-count-3", "2019-11-04-count-1", "2019-11-04-count-2", "2019-11-04-count-3", "2020-03-18-count-1", "2020-03-18-count-2", "2020-03-18-count-3", "2020-09-11-AML4340_AML1371-c1","2020-09-11-AML4340_AML1371-c2", "2020-10-06-count2", "2020-10-06-count4_0.95", "2021-03-09-count1_0.95", "2021-03-09-Z-1-1", "2021-03-09-Z-1-2", "2021-03-09-Z-1-3")){
+    count <- merged_metadata2 %>% dplyr::group_by(samples) %>% dplyr::count(assignment)
+    count_table <- reshape::cast(count, samples~assignment) 
+    write.csv(count_table, paste0(out_path, "/count_cell_per_cluster_table.csv"))
+
+    print(count_table)
+
+    assignment_table <- count %>% dplyr::group_by(samples)  %>% dplyr::summarize(cluster_assignment=assignment[which.max(n)]) 
+    assignment_table <- as.data.frame(assignment_table)
+
+    if(sample_name=="2021-03-09-count1_0.95_3clusters"){
+      assignment_table[which(assignment_table$samples=="AML001_Dec"),"cluster_assignment"] <- 1
+    }
+
+    write.csv(assignment_table, paste0(out_path, "/cluster_assignment_table.csv"))
+    print(assignment_table)
+
+    merged_metadata2$filter3 <- rep(NA, dim(merged_metadata2)[1])
+    for (i in 1:dim(assignment_table)[1]){
+      merged_metadata2$filter3 <- ifelse(merged_metadata2$samples %in% str_subset(merged_metadata2$samples, eval(assignment_table[i,1])) & merged_metadata2$assignment ==eval(assignment_table[i,2]), merged_metadata2$samples, merged_metadata2$filter3)
+    }
+
+  }
+
+  print(sum(is.na(merged_metadata2$filter3)))
+  #save filtered cells
+  df2 <- data.frame(rep(sample_name, length(merged_metadata2$cell[which(is.na(merged_metadata2$filter3))])), merged_metadata2$cell[which(is.na(merged_metadata2$filter3))], rep("incorrect_hash", length(merged_metadata2$cell[which(is.na(merged_metadata2$filter3))])))
+  colnames(df2) <- c("sample_name", "cell", "reason")
+  df <- rbind(df,df2)
+
+  print(glue("We are filtering those cells that have hash assignments that do not agree with the majority cluster, here, we are filtering {sum(is.na(merged_metadata2$filter3))} cells."))
+
+  merged_metadata3 <- subset(merged_metadata2, !(is.na(merged_metadata2$filter3)))
+
+
+
+  print(ggplot(merged_metadata3, aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "samples")) +
+    geom_point(size = 0.05) +
+    xlab("UMAP 1") +
+    ylab("UMAP 2") +
+    ggtitle(umap_val) +
+    scale_color_manual(values=samplecolors) +
+    facet_wrap("samples", ncol=2) +
+    guides(color=guide_legend(override.aes=list(size=3))) +
+    theme(text = element_text(size=16)) )
+  ggsave(paste0("UMAP_patients_per_patient_doublet_unassigned_false_hash_calling_filtering_",sample_name,".pdf"), path=temp_path, device="pdf", height=height, width=11)
+
+  if(sum(str_detect(unique(merged_metadata3$samples),"Control")) > 0){
+    merged_metadata3$aml <- ifelse(str_detect(merged_metadata3$samples,"Control"), "Control", "AML")
+    merged_metadata3$aml <- factor(merged_metadata3$aml, levels=c("Control", "AML"))
+
+    print(ggplot(merged_metadata3, aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "samples")) +
+      geom_point(size = 0.2) +
+      xlab("UMAP 1") +
+      ylab("UMAP 2") +
+      facet_wrap("aml", ncol=2) +
+      ggtitle(umap_val) +
+      scale_color_manual(values=samplecolors) +
+      guides(color=guide_legend(override.aes=list(size=3))) +
+      theme(text = element_text(size=16)) )
+    ggsave(paste0("UMAP_patients_control_AML_doublet_unassigned_false_hash_calling_filtering_",sample_name,".pdf"), path=temp_path, device="pdf", height=5, width=11)
+
+  }
+
+  print(ggplot(merged_metadata3, aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "samples")) +
+    geom_point(size = 0.2) +
+    xlab("UMAP 1") +
+    ylab("UMAP 2") +
+    ggtitle(umap_val) + 
+    theme_classic() +
+    scale_color_manual(values=samplecolors) +
+    guides(color=guide_legend(override.aes=list(size=3))) +
+    theme(text = element_text(size=16)) )
+  ggsave(paste0("UMAP_patients_doublet_unassigned_false_hash_calling_filtering_",sample_name,".pdf"), path=temp_path, device="pdf")
+
+  
+  write.csv(df, paste0(temp_path, "/Filter_summary_file",sample_name,".csv"))
+
+  filter_summary_file <-rbind(filter_summary_file, df)
+
+}
+
+write.csv(filter_summary_file, paste0(out_path, "all_filtered_cells_summary_file.csv"))
+```

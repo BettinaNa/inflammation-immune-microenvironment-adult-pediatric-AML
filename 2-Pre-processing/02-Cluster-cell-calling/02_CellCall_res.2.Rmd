@@ -1,0 +1,107 @@
+---
+title: "Module-score-res.2-Cluster-ad_ped_cntrl_v5"
+author: 'User ID: `r Sys.getenv("USER")`'
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    fig_height: 7
+    fig_width: 9
+    keep_md: yes
+    toc: yes
+    df_print: paged
+params:
+  metadata_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/Cluster-ad_ped_cntrl_v5/cluster-dim.30-neighbors.25/metadata.csv"
+  data_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/Cluster-ad_ped_cntrl_v5/cluster-dim.30-neighbors.25/res-res.2-avg.csv"
+  geneset_path: "/gpfs/data/aifantislab/home/nadorb01/Common_data/genes.broad.csv" # broad cell type markers from: Witkowski, Dolgalev et al., Cancer Cell, 2020
+  out_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/"
+  sample_name: "ad_ped_cntrl_v5_res.2"
+  keys: "res.2"
+  umap_val: "UMAPndim30nn25lognorm"
+---
+
+```{r setup, include=FALSE}
+attach(params) 
+library(devtools)
+load_all("/gpfs/data/aifantislab/home/nadorb01/common_scripts/scooter") # https://github.com/igordot/scooter
+theme_set(theme_bw())
+library(pheatmap)
+library(forcats)
+library(magrittr)
+library(cowplot)
+library(dplyr)
+library(RColorBrewer)
+source("/gpfs/data/aifantislab/home/nadorb01/common_scripts/helper.R")
+
+knitr::opts_chunk$set(echo = TRUE, 
+                      warning = FALSE, 
+                      message = FALSE, 
+                      fig.path = file.path(out_path, paste0("geneset-score-", sample_name, "/")))
+```
+
+```{r process_params}
+out_path = file.path(out_path, paste0("geneset-score-", sample_name))
+dir.create(out_path, showWarnings = FALSE)
+```
+
+# Read in data from somewhere a s_obj 
+```{r load_data}
+metadata <- read.csv(metadata_path, stringsAsFactors=F)
+metadata <- metadata #%>% column_to_rownames("cell")
+data <- read.csv(data_path, stringsAsFactors=F)
+
+data <- data %>% 
+  column_to_rownames("gene") %>% 
+  as.matrix()
+
+genes_wbm <- read.csv(geneset_path, stringsAsFactors=F) %>% 
+  select(gene, celltype)
+
+genes_wbm <- subset(genes_wbm, genes_wbm$gene %in% rownames(data))
+
+```
+
+## Run Module score
+```{r}
+geneset_score <- geneset_score(module_tbl = genes_wbm, counts_raw = data, min_cpm = 0, limit_pct = 1)
+```
+
+## Get maximum score
+```{r}
+geneset_score <- max_scores(scores = geneset_score, 
+           method = keys, threshold = 0.0001)
+```
+
+## Heatmap
+```{r scores_heatmap}
+pdf(paste0(out_path, "/heatmap_scores.pdf"), useDingbats=F, onefile=F)
+print(pheatmap(geneset_score[,str_detect(colnames(geneset_score), "score")]))
+dev.off()
+```
+
+## Plot annotated UMAPs
+```{r merge_geneset_score_metadata}
+# fix metadata
+geneset_score <- geneset_score %>% 
+  rownames_to_column(eval(keys))
+
+geneset_score$res.2 <- gsub("cluster_","", geneset_score$res.2)
+metadata$res.2 <- as.character(metadata$res.2)
+
+# merge modules with metadata 
+metadata <- full_join(metadata, geneset_score, by = "res.2")
+
+write_excel_csv(metadata, paste0(out_path, "/metadata.csv"))
+```
+
+```{r umap-geneset}
+ggplot(metadata, aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "module")) +
+  geom_point(size = 0.1) +
+  xlab("UMAP_1") +
+  ylab("UMAP_2") +
+  theme_classic()+
+  ggtitle(umap_val) +
+  ggsci::scale_color_npg() +
+  theme(text = element_text(size=20), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  guides(color=guide_legend(override.aes=list(size=3)))
+ggsave("UMAP_annotated_res.2_npg.pdf", path=out_path, device="pdf", width=14, height=14)
+```

@@ -1,0 +1,121 @@
+---
+title: "Cluster adult and pediatric AML seurat object"
+author: 'User ID: `r Sys.getenv("USER")`'
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    fig_height: 7
+    fig_width: 9
+    keep_md: yes
+    toc: yes
+    df_print: paged
+params:
+  out_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/"
+  data_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/data/Filtered-SoupX-ad_ped_cntrl_v5/seurat_obj_Dx_dim_soupX.rds" #path to the seurat object
+  sample_name: "ad_ped_cntrl_v5"
+  prefix: "lognorm"
+  num_neighbors_umap: 25
+  pcs_name: NULL
+  num_dim: 30
+  num_neighbors: 25
+  resolutions: NULL
+  log_file: NULL
+  group: "res.2"
+---
+
+
+```{r setup, include=FALSE}
+attach(params) 
+library(devtools)
+library(future)
+library(matrixStats)
+load_all("/gpfs/data/aifantislab/home/nadorb01/common_scripts/scooter") # from https://github.com/igordot/scooter
+source("/gpfs/data/aifantislab/home/nadorb01/common_scripts/helper.R")
+theme_set(theme_bw())
+
+knitr::opts_chunk$set(echo = TRUE, 
+                      warning = FALSE, 
+                      message = FALSE, 
+                      fig.path = file.path(out_path, paste0("Cluster-", sample_name, "/")))
+
+plan("multiprocess", workers = 4)
+options(future.globals.maxSize = 64 * 1024^2 *1000)
+```
+
+
+```{r process_params}
+out_path = file.path(out_path, paste0("Cluster-", sample_name))
+dir.create(out_path, showWarnings = FALSE)
+
+if(is.null(resolutions)) {
+  res= c(0.5, 1, 2, 3, 4, 5, 7, 8, 10, 15, 20, 25, 30)
+  
+} else {
+  res = resolutions
+}
+```
+
+# Read in data
+```{r}
+seurat_obj <- readRDS(data_path)
+```
+
+## Calculate Clusters
+```{r}
+reduction_names <- c(paste0("umapndim",num_dim,"nn", num_neighbors_umap, prefix), paste0("pca"))
+
+metadata <- as_data_frame_seurat(seurat_obj = seurat_obj,  
+                     reduction = reduction_names, metadata = TRUE)
+
+pcs <- metadata[,str_detect(colnames(metadata), "^PC")]
+pcs <- as.data.frame(pcs)
+rownames(pcs) <- metadata$cell
+clusters <- calculate_clusters(pcs = pcs, num_dim =  num_dim, 
+                               log_file = log_file, 
+                               num_neighbors = num_neighbors, res = res)
+
+```
+# Add clusters to seurat_obj
+```{r name adjustment and saving of seurat_obj}
+# put clusters into seurat metadata
+seurat_obj@meta.data <- merge_metadata(seurat_obj, clusters)
+
+# # save seurat_obj
+saveRDS(seurat_obj, file = paste0(out_path, "/", "seurat_obj.rds"))
+```
+
+## Plot clusters
+```{r plots}
+metadata <- merge_metadata(metadata, clusters)
+
+reduction_names <- paste0("UMAPndim",num_dim,"nn", num_neighbors_umap, prefix)
+
+plot_dr <- data.frame(X = paste0(reduction_names, "_1"),
+                      Y = paste0(reduction_names, "_2"),
+                      stringsAsFactors = FALSE)
+
+cluster_path <- file.path(out_path, paste0("cluster-dim.", num_dim, "-neighbors.", num_neighbors))
+dir.create(cluster_path, showWarnings = FALSE)
+
+write_excel_csv(metadata, path = paste0(cluster_path, "/", "metadata.csv"))
+
+for(i in 1:nrow(plot_dr)){
+  for(j in res) {
+  current_plot <- plot_scatter(metadata = metadata,
+                               out_path = cluster_path,
+                               proj_name = sample_name,
+                               log_file = log_file,
+                               X = plot_dr[i,1],
+                               Y = plot_dr[i,2],
+                               color = paste0("res.", j),
+                               write = TRUE)
+  }
+}
+```
+
+## Get Cluster averages for selected clusters
+```{r} 
+data <- seurat_obj@assays$RNA_soupx@counts 
+avg_res <- calc_clust_averages_large(metadata = metadata, data = data, group = group) 
+write_excel_csv(avg_res, path = paste0(cluster_path, "/", glue("res-{group}-avg.csv"))) 
+```

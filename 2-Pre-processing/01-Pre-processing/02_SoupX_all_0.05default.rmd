@@ -1,0 +1,160 @@
+---
+title: "SoupX ambient RNA filtering - `r params$sample_name`"
+author: 'User ID: `r Sys.getenv("USER")`'
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    fig_height: 7
+    fig_width: 9
+    keep_md: yes
+    toc: yes
+    df_print: paged
+params:
+  out_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/data/SoupX_0.05_default/"
+  orig.ident_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/data/metadata/orig.ident_path1.csv" # csv file containing two columns, "orig.ident", "path" - to cellranger output
+  prefix_table: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/data/metadata/orig.ident_barcode_table.csv" # prefix + cells as created in 01_Merge_objects_splitting.rds 
+  log_file: NULL
+---
+
+```{r setup, include=FALSE}
+attach(params) 
+knitr::opts_chunk$set(echo = TRUE, 
+                      warning = FALSE, 
+                      message = FALSE, 
+                      fig.path = file.path(out_path))
+
+library(SoupX)
+library(stringr)
+library(dplyr)
+library(future)
+
+# # evaluate Seurat R expressions asynchronously when possible (such as ScaleData) using future package
+plan("multiprocess", workers = 4)
+options(future.globals.maxSize = 64000 * 1024^2) # for 64 Gb RAM
+
+#create out_path
+dir.create(out_path, recursive=TRUE)
+```
+
+
+```{r read_10x_data}
+# load orig.ident_path table:
+prefix_path <- read.csv(orig.ident_path, stringsAsFactors=FALSE)
+
+# read prefix_table
+prefix_table <- read.csv(prefix_table, stringsAsFactors=FALSE)
+
+# contamination summary table
+contamination_summary <- matrix(ncol=4, nrow=1) %>% as.data.frame()
+colnames(contamination_summary) <- c("library", "SoupX_contamination", "adjusted", "adjusted_SoupX_cont")
+
+
+for (i in seq_along(prefix_path$orig.ident)){
+
+    sample_name <- prefix_path[i,"orig.ident"]
+    data_path <- prefix_path[i,"path"]
+
+    print(sample_name)
+    # create out_dir
+    temp_path <- paste0(out_path, "SoupX-filtered-", sample_name, "/")
+    dir.create(temp_path)
+
+    # split prefix from barcode:
+    cells_keep <- prefix_table %>% filter(orig.ident == eval(sample_name)) %>% .$barcode
+
+    cells <- read.delim(gzfile(paste0(data_path, "outs/filtered_feature_bc_matrix/barcodes.tsv.gz")), sep="\t", header=FALSE, stringsAsFactors=F) %>%
+                mutate(barcode=gsub("-1", "", V1))
+
+    # filter cells that are not in final object or in the final 
+    cells_filter <- cells$barcode[which(!(cells$barcode %in% cells_keep))]
+
+    print("read and filter mtx")
+    # read 10x mtx file
+    mtx = Seurat::Read10X(file.path(data_path,'outs/raw_feature_bc_matrix'),strip.suffix=TRUE)
+
+    if(sample_name != "2020-03-18-AML3266"){
+        mtx <- mtx[["Gene Expression"]]
+    }
+
+    # filter mtx file for cells we filtered due to quality/hashing
+    mtx <- mtx[,which(!(colnames(mtx) %in% cells_filter))]
+    mtx_filt <- mtx[,which(colnames(mtx) %in% cells_keep)]
+
+    
+    print("Run SoupX")
+    
+    # use 10x clustering information as we don't have cell type information yet
+    mDat = NULL
+    tgt = file.path(data_path,'outs','analysis','clustering','graphclust','clusters.csv')
+    if(file.exists(tgt)){
+        clusters = read.csv(tgt)
+        mDat = data.frame(clusters=clusters$Cluster,row.names=clusters$Barcode)
+    }
+    #Add fine grained clusters too if present
+    tgt = file.path(data_path,'outs','analysis','clustering','kmeans_10_clusters','clusters.csv')
+    if(file.exists(tgt)){
+        clusters = read.csv(tgt)
+        mDat$clustersFine = clusters$Cluster
+        #mDat$clusters = clusters$Cluster
+    }
+    
+
+
+    # remove -1
+    rownames(mDat) = gsub('-1$','',rownames(mDat))
+
+    if(sample_name!="2020-10-06-count4_0.95"){
+        # subset mData our cells:
+        mDat <- mDat[colnames(mtx_filt),]
+    } else {
+        mDat <- subset(mDat,rownames(mDat) %in% colnames(mtx_filt))
+        mtx_filt <- mtx_filt[,rownames(mDat)]
+    }
+
+    if(any(rownames(mDat)!=colnames(mtx_filt)))
+      stop("Error matching meta-data to cell names.")
+  
+    # create soup channel
+    sc = SoupChannel(tod=mtx,toc=mtx_filt,metaData = mDat)
+
+    # # set clustering of soup obj = we are using our cell types
+    # sc = setClusters(sc,setNames(prefix_table$cell_type_refined,prefix_table$barcode))
+
+    #Estimate rho - this seems to be higher in some cases - we shouldn't remove more than 20% background
+    sc1 = try(autoEstCont(sc))
+
+    if (class(sc1)=="try-error") {
+        cat("Estimated soup fraction >50%, set to 5% by default.\n")
+        sc1 = setContaminationFraction(sc, 0.05)
+        contamination_summary[i,] <- c(sample_name, 0.5, "yes", 0.05)
+    } else if (sc1$fit$rhoEst>0.2) {
+        print(sc1$fit$rhoEst)
+        cat("Estimated soup fraction >20%, set to 5% by default.\n")
+        contamination_summary[i,] <- c(sample_name, sc1$fit$rhoEst, "yes", 0.05)
+        sc1 = setContaminationFraction(sc, 0.05)
+    } else {
+        contamination_summary[i,] <- c(sample_name, sc1$fit$rhoEst, "no", sc1$fit$rhoEst)
+    }
+
+    #Clean the data
+    out = adjustCounts(sc1)
+    colnames(out) <- paste0(sample_name, ":", colnames(out))
+
+    # save objects
+    saveRDS(sc1, paste0(temp_path, "sc_soupX_", sample_name,".rds"))
+    saveRDS(out, paste0(temp_path, "soupX_count_mtx_", sample_name,".rds"))
+
+    print("Merge mtxs")
+    if(i==1){
+        out_merge <- out
+    } else{
+        out_merge <- cbind(out_merge, out)
+    }
+
+}
+
+# save combined filtered matrix
+saveRDS(out_merge, paste0(out_path, "soupX_count_mtx_combined.rds"))
+write.csv(contamination_summary, paste0(out_path,"soupX_contamination_summary.csv"))
+
+```
