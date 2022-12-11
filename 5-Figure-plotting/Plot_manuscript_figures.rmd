@@ -466,13 +466,15 @@ ggsave("CD72_ADT_violin_ABC.pdf",device="pdf",height=5,width=4)
 # Figure 4A) T/NK cell UMAP split ap_aml
 
 # T cell colors: 
-ct.cols <- c(brewer.pal(9, "Greens")[c(3,5,7,9)], brewer.pal(9, "RdPu")[c(5,7,8,9)],brewer.pal(9,"Blues")[c(6,8)], "#4A1539", "grey","#FFC40C", "#EEAA0D", "#DE900F", "#CD7710", "#BD5D12")
+ct.cols <- c(brewer.pal(9, "Greens")[c(3,5,7,9)], brewer.pal(9, "RdPu")[c(5,7,8,9)],brewer.pal(9,"Blues")[c(6,8)], "#4A1539", "grey","#FFC40C", "#EEAA0D", "#DE900F",  "#BD5D12")
+
 names(ct.cols) <- c("CD4+ Naive","CD4+ TCM", "CD4+ Activated","Treg", 
                       "CD8+ Naive", "CD8+ GZMK+","CD8+ IFN+", "CD8+ Cytotoxic", "CD8+ NK-like", "CD8+ TRM",
                       "MAIT", "gd T",
+                      "CD56bright NK", "CD56dim NK", "Activated NK", "IFN+ NK")
 
 # load data
-seurat_obj <- readRDS(metadata_path_T_NK) # s_obj <- readRDS(paste0(out_path1,"R-Figure4-T_cells_no_cc_reg/s_obj_T_NK_wo_cluster15_final.rds"))
+seurat_obj <- readRDS(metadata_path_T_NK)
 
 umap_val <- "UMAPndim20nn20"
 metadata <- FetchData(seurat_obj, vars=c(colnames(seurat_obj@meta.data), paste0(umap_val,"_1"), paste0(umap_val,"_2"))))
