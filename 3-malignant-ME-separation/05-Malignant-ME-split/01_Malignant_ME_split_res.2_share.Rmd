@@ -26,6 +26,7 @@ library(future)
 library(dplyr)
 library(tibble)
 library(stringr)
+library(glue)
 set.seed(1234)
 
 knitr::opts_chunk$set(echo = TRUE, 
@@ -57,8 +58,6 @@ clusters, they might be worthwhile including.
 ```{r add_cnv_data}
 # combine InferCNV output data
 dirs <- dir(CNV_data_path, "map_metadata_from_infercnv.txt", recursive=TRUE, full.names = TRUE)
-write.table(dirs, paste0(out_path, "files_used_for_CNV.txt"), quote=FALSE)
-
 write.table(dirs, paste0(out_path, "files_used_for_CNV.txt"), quote=FALSE)
 
 cnv_data <- list()

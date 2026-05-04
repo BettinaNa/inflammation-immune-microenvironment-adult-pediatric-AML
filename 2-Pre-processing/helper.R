@@ -33,9 +33,9 @@ dim_reductions_RNA_ADT <- function(s_obj, ADT_norm=TRUE){
     s_obj <- s_obj %>%
       NormalizeData(assay = "ADT", normalization.method = "CLR",margin = 2) %>%
       ScaleData(assay = "ADT")
-    
-    return(s_obj)
   }
+
+  return(s_obj)
 }
 
 ## geneset score function adjustment:

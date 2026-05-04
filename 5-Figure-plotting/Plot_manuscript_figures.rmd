@@ -249,7 +249,7 @@ print(ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val,
         xlab("UMAP 1") +
         ylab("UMAP 2") +
         theme_classic() +
-        viridis::scale_fill_viridis(option = "D") +
+        viridis::scale_color_viridis(option = "D") +
         theme(text = element_text(size=14)) )
 ggsave(filename = paste0("UMAP_inflammation_1_HSPC_Myeloid.pdf"), path = out_path, width =9 ,height =7 ,device = "pdf", useDingbats=F)
 
@@ -258,9 +258,9 @@ print(ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val,
         xlab("UMAP 1") +
         ylab("UMAP 2") +
         theme_classic() +
-        viridis::scale_fill_viridis(option = "D") +
+        viridis::scale_color_viridis(option = "D") +
         theme(text = element_text(size=14)) )
-ggsave(filename = paste0("UMAP_inflammation_1_HSPC_Myeloid.pdf"), path = out_path, width =9 ,height =7 ,device = "pdf", useDingbats=F)
+ggsave(filename = paste0("UMAP_inflammation_2_HSPC_Myeloid.pdf"), path = out_path, width =9 ,height =7 ,device = "pdf", useDingbats=F)
 
 
 # Figure 2D)
@@ -348,6 +348,7 @@ umap_val <- "UMAPndim20nn20"
 # Associated metadata and DE results can be found in Source data 3
 # Figure 3A) B cell UMAP split ap_aml
 
+seurat_obj <- readRDS(B_seurat_path)
 metadata <- FetchData(seurat_obj, vars=c(colnames(seurat_obj@meta.data), paste0(umap_val,"_1"), paste0(umap_val,"_2")))
 
 metadata$ap_aml <- factor(metadata$ap_aml, levels=c("Control", "adult_AML", "pediatric_AML"))
@@ -427,7 +428,7 @@ genes$highlight <- ifelse(genes$X %in% B_genes_annotate, as.character(genes$X), 
 ggplot(genes, aes(x=X, y=1, fill=avg_logFC))+
   geom_tile()+
   theme_classic()+
-  scale_x_discrete(labels=genes$highlight, breaks=genes$highligh)+
+  scale_x_discrete(labels=genes$highlight, breaks=genes$highlight)+
   theme( axis.text.y=element_blank(), axis.ticks.y=element_blank(), axis.line = element_blank(), legend.position="bottom", axis.text.x=element_text(angle = 90, vjust = 0.5, hjust=1))+
   xlab("")+ylab("")+
   scale_fill_gradientn(colours=colorRampPalette(rev(brewer.pal(n = 11, name ="RdBu")))(100))
@@ -477,11 +478,11 @@ names(ct.cols) <- c("CD4+ Naive","CD4+ TCM", "CD4+ Activated","Treg",
 seurat_obj <- readRDS(metadata_path_T_NK)
 
 umap_val <- "UMAPndim20nn20"
-metadata <- FetchData(seurat_obj, vars=c(colnames(seurat_obj@meta.data), paste0(umap_val,"_1"), paste0(umap_val,"_2"))))
+metadata <- FetchData(seurat_obj, vars=c(colnames(seurat_obj@meta.data), paste0(umap_val,"_1"), paste0(umap_val,"_2")))
 # plot
 
 metadata$ap_aml <- factor(metadata$ap_aml, levels=c("Control","adult_AML", "pediatric_AML"))
-ggplot(shuf(meta_t_ADT), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "Cell_type_identity")) +
+ggplot(shuf(metadata), aes_string(paste0(umap_val, "_1"), paste0(umap_val, "_2"), color = "Cell_type_identity")) +
   geom_point(size = 0.1) +
   xlab("UMAP_1")+
   ylab("UMAP_2")+

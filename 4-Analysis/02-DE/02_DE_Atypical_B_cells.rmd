@@ -11,7 +11,7 @@ output:
     df_print: paged
 params:
   out_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/"
-  data_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/R-Figure3-B_cells_no_cc_reg/seurat_obj_B_fin.rds.rds"
+  data_path: "/gpfs/data/aifantislab/home/nadorb01/projects/ad_ped_AML_v5/results/R-Figure3-B_cells_no_cc_reg/seurat_obj_B_fin.rds"
   sample_name: "Atypical_B"
 ---
 
